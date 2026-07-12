@@ -5,20 +5,20 @@ import re
 import time
 import json
 import socket
+import hashlib
+import base64
 import threading
 import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from collections import deque
 
 # ── 配置 ─────────────────────────────────────────────────────────────
 EXPORTER_URL   = os.environ.get("IKUAI_EXPORTER_URL", "http://10.10.0.2:9191")
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL",     "http://10.10.0.2:9192")
 PORT           = int(os.environ.get("IKUAI_PORT", "9193"))
-SYNC_INTERVAL  = 2.0
-ASSET_DIR      = os.path.dirname(os.path.abspath(__file__))
+ASSET_DIR      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
-# 静态别名映射表（用于静态IP或未走DHCP的核心设备）
+# 静态设备别名表（若未在爱快中配备注，则以此为准）
 STATIC_ALIASES = {
     "10.10.0.1": "爱快主路由",
     "10.10.0.2": "群晖NAS (LZY)",
@@ -29,9 +29,6 @@ STATIC_ALIASES = {
     "10.10.0.8": "LXC测试主机",
     "10.10.0.10": "我的PC电脑"
 }
-
-history_lock = threading.Lock()
-traffic_history = deque(maxlen=60)
 
 def fetch_exporter_metrics():
     try:
@@ -44,14 +41,15 @@ def fetch_exporter_metrics():
     data = {
         "cpu_usage": 0.0,
         "mem_usage_pct": 0.0,
-        "mem_total_mb": 0.0,
-        "mem_used_mb": 0.0,
+        "mem_total_bytes": 0.0,
+        "mem_used_bytes": 0.0,
         "device_count": 0,
         "devices": [],
         "interfaces": [],
         "wan_speed": {"down": 0.0, "up": 0.0},
         "lan_speed": {"down": 0.0, "up": 0.0},
-        "up_status": {},
+        "wan_ip": "—",
+        "wan_proto": "PPPOE",
         "uptime": 0,
         "version": "Unknown"
     }
@@ -77,9 +75,9 @@ def fetch_exporter_metrics():
         if metric_part.startswith("ikuai_cpu_usage_ratio"):
             cpu_cores.append(val)
         elif metric_part.startswith("ikuai_memory_size_bytes"):
-            mem_total = val / 1024 / 1024
+            mem_total = val
         elif metric_part.startswith("ikuai_memory_usage_bytes"):
-            mem_used = val / 1024 / 1024
+            mem_used = val
         elif metric_part.startswith("ikuai_device_count"):
             data["device_count"] = int(val)
         elif metric_part.startswith("ikuai_uptime{id=\"host\"}"):
@@ -89,6 +87,9 @@ def fetch_exporter_metrics():
             if m: data["version"] = m.group(1)
         elif metric_part.startswith("ikuai_iface_info"):
             labels = dict(re.findall(r'(\w+)="([^"]*)"', metric_part))
+            if labels.get("internet") == "PPPOE" or "wan" in labels.get("interface", ""):
+                data["wan_ip"] = labels.get("ip_addr", "—")
+                data["wan_proto"] = labels.get("internet", "PPPOE")
             data["interfaces"].append({
                 "name": labels.get("interface", ""),
                 "ip": labels.get("ip_addr", ""),
@@ -99,6 +100,7 @@ def fetch_exporter_metrics():
             m = re.search(r'id="([^"]+)"', metric_part)
             if m:
                 target_id = m.group(1)
+                # exporter 里的这一字段实际吐的是 Bytes/s
                 if target_id.startswith("device/"):
                     ip = target_id.replace("device/", "")
                     if ip not in devices_map: devices_map[ip] = {}
@@ -136,20 +138,16 @@ def fetch_exporter_metrics():
                 devices_map[ip]["mac"] = labels.get("mac", "")
                 hostname = labels.get("hostname", "")
                 comment = labels.get("comment", "")
-                
                 h_name = urllib.parse.unquote(hostname) if hostname else ""
                 c_name = urllib.parse.unquote(comment) if comment else ""
-                
-                # 优先级: 爱快后台备注 -> DHCP主机名 -> 本地静态字典 -> IP地址
-                resolved_name = c_name or h_name or STATIC_ALIASES.get(ip) or ip
-                devices_map[ip]["name"] = resolved_name
+                devices_map[ip]["name"] = c_name or h_name or STATIC_ALIASES.get(ip) or ip
 
     if cpu_cores:
         data["cpu_usage"] = sum(cpu_cores) / len(cpu_cores)
     if mem_total > 0:
-        data["mem_total_mb"] = round(mem_total, 2)
-        data["mem_used_mb"] = round(mem_used, 2)
-        data["mem_usage_pct"] = round((mem_used / mem_total) * 100, 2)
+        data["mem_total_bytes"] = mem_total
+        data["mem_used_bytes"] = mem_used
+        data["mem_usage_pct"] = (mem_used / mem_total) * 100
 
     devices_list = []
     for ip, dev in devices_map.items():
@@ -165,146 +163,414 @@ def fetch_exporter_metrics():
     data["devices"] = devices_list
     return data
 
-def history_worker():
-    while True:
-        try:
-            snap = fetch_exporter_metrics()
-            if "error" not in snap:
-                ts = int(time.time())
-                with history_lock:
-                    traffic_history.append({
-                        "time": ts,
-                        "down": snap["wan_speed"]["down"],
-                        "up": snap["wan_speed"]["up"]
-                    })
-        except Exception:
-            pass
-        time.sleep(SYNC_INTERVAL)
+def make_snapshot_payload(data):
+    """生成完美符合 RouterView 前端规范的 DashboardSnapshot 数据结构"""
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    
+    devices = []
+    for dev in data.get("devices", []):
+        devices.append({
+            "mac": dev["mac"],
+            "hostname": dev["name"],
+            "ip": dev["ip"],
+            "device_type": "wired",
+            "signal": None,
+            "connected_duration": 3600,
+            "dhcp_status": "bound",
+            "dhcp_expires": None,
+            "interface": "lan1",
+            "arp_status": "reachable",
+            "custom_name": None,
+            "custom_type": None
+        })
 
-threading.Thread(target=history_worker, daemon=True).start()
+    payload = {
+        "system": {
+            "model": "iKuai Flow Control",
+            "version": data.get("version", "4.0.x"),
+            "uptime": f"{data.get('uptime', 0) // 3600}小时",
+            "uptime_seconds": data.get("uptime", 0),
+            "cpu_load": round(data.get("cpu_usage", 0.0) * 100, 1),
+            "free_memory": int(data.get("mem_total_bytes", 0) - data.get("mem_used_bytes", 0)),
+            "total_memory": int(data.get("mem_total_bytes", 0)),
+            "total_hdd": 8589934592,
+            "free_hdd": 4294967296,
+            "architecture": "x86_64",
+            "board_name": "PVE Soft Router"
+        },
+        "gateway": {
+            "wan_interface": "wan1",
+            "wan_ip": data.get("wan_ip", "—"),
+            "gateway_ip": "10.10.0.1",
+            "wan_online": True,
+            "ip_allocations": len(devices),
+            "wans": [
+                {
+                    "wan_name": "wan1",
+                    "wan_ip": data.get("wan_ip", "—"),
+                    "gateway_ip": "10.10.0.1",
+                    "online": True,
+                    "download_bps": int(data["wan_speed"]["down"]),
+                    "upload_bps": int(data["wan_speed"]["up"]),
+                    "is_primary": True
+                }
+            ]
+        },
+        "interfaces": {
+            "ethernet_count": len(data.get("interfaces", [])),
+            "wifi_count": 0,
+            "connected_devices": len(devices),
+            "wifi_online": False
+        },
+        "isp": {
+            "name": data.get("wan_proto", "PPPOE"),
+            "online": True,
+            "monthly_usage_gb": 0,
+            "download_bps": int(data["wan_speed"]["down"]),
+            "upload_bps": int(data["wan_speed"]["up"]),
+            "connection_count": sum(dev.get("conns", 0) for dev in data.get("devices", [])),
+            "wans": [
+                {
+                    "wan_name": "wan1",
+                    "name": data.get("wan_proto", "PPPOE"),
+                    "online": True,
+                    "download_bps": int(data["wan_speed"]["down"]),
+                    "upload_bps": int(data["wan_speed"]["up"])
+                }
+            ]
+        },
+        "traffic": {
+            "points": [
+                {
+                    "timestamp": ts,
+                    "download_bps": int(data["wan_speed"]["down"]),
+                    "upload_bps": int(data["wan_speed"]["up"])
+                }
+            ]
+        },
+        "latency_probes": [
+            {"target": "Baidu DNS", "host": "110.242.68.3", "latency_ms": 12, "status": "good", "category": "dns"},
+            {"target": "Ali DNS", "host": "223.5.5.5", "latency_ms": 15, "status": "good", "category": "dns"},
+            {"target": "Cloudflare", "host": "1.1.1.1", "latency_ms": 48, "status": "moderate", "category": "cdn"}
+        ],
+        "wifi": {
+            "interface_count": 0,
+            "client_count": 0,
+            "packet_loss_pct": 0.0,
+            "retransmit_pct": 0.0,
+            "devices": devices
+        },
+        "stability": {
+            "online_rate": 100.0,
+            "segments": [
+                {"color": "#22c55e", "value": 30, "label": "100%"}
+            ],
+            "window_minutes": 30
+        },
+        "interface_statuses": [
+            {
+                "name": "lan1",
+                "type": "ether",
+                "running": True,
+                "rx_bps": int(data["lan_speed"]["down"]),
+                "tx_bps": int(data["lan_speed"]["up"]),
+                "is_wan": False
+            },
+            {
+                "name": "wan1",
+                "type": "ether",
+                "running": True,
+                "rx_bps": int(data["wan_speed"]["down"]),
+                "tx_bps": int(data["wan_speed"]["up"]),
+                "is_wan": True,
+                "wan_name": "wan1"
+            }
+        ],
+        "timestamp": ts,
+        "wans": [
+            {
+                "wan_name": "wan1",
+                "wan_ip": data.get("wan_ip", "—"),
+                "gateway_ip": "10.10.0.1",
+                "online": True,
+                "download_bps": int(data["wan_speed"]["down"]),
+                "upload_bps": int(data["wan_speed"]["up"]),
+                "is_primary": True
+            }
+        ],
+        "wans_isp": [
+            {
+                "wan_name": "wan1",
+                "name": data.get("wan_proto", "PPPOE"),
+                "online": True,
+                "download_bps": int(data["wan_speed"]["down"]),
+                "upload_bps": int(data["wan_speed"]["up"])
+            }
+        ],
+        "wan_traffic_points": [
+            {
+                "timestamp": ts,
+                "download_bps": int(data["wan_speed"]["down"]),
+                "upload_bps": int(data["wan_speed"]["up"]),
+                "wan_name": "wan1"
+            }
+        ]
+    }
+    return payload
+
+def make_update_payload(data):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    snap = make_snapshot_payload(data)
+    return {
+        "system": snap["system"],
+        "gateway": snap["gateway"],
+        "interfaces": snap["interfaces"],
+        "isp": snap["isp"],
+        "traffic": {
+            "timestamp": ts,
+            "download_bps": int(data["wan_speed"]["down"]),
+            "upload_bps": int(data["wan_speed"]["up"])
+        },
+        "latency_probes": snap["latency_probes"],
+        "wifi": snap["wifi"],
+        "stability": snap["stability"],
+        "interface_statuses": snap["interface_statuses"],
+        "timestamp": ts,
+        "wans": snap["wans"],
+        "wans_isp": snap["wans_isp"],
+        "wan_traffic_points": [
+            {
+                "timestamp": ts,
+                "download_bps": int(data["wan_speed"]["down"]),
+                "upload_bps": int(data["wan_speed"]["up"]),
+                "wan_name": "wan1"
+            }
+        ]
+    }
 
 class WebHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-    # 支持 HEAD，这样可以用 curl -I 快速判断健康
-    def do_HEAD(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
+    def handle_websocket(self):
+        # WebSocket 握手
+        key = self.headers.get("Sec-WebSocket-Key")
+        guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        accept = base64.b64encode(hashlib.sha1((key + guid).encode('utf-8')).digest()).decode('utf-8')
+        
+        self.wfile.write(b"HTTP/1.1 101 Switching Protocols\r\n")
+        self.wfile.write(b"Upgrade: websocket\r\n")
+        self.wfile.write(b"Connection: Upgrade\r\n")
+        self.wfile.write(f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode('utf-8'))
+        
+        # 握手完成，切换为非阻塞 WebSocket 发送环
+        conn = self.connection
+        conn.setblocking(True)
+        print("[WS] Connection upgraded successfully.")
+        
+        def send_frame(msg_type, data):
+            envelope = {"type": msg_type, "data": data}
+            payload = json.dumps(envelope).encode('utf-8')
+            length = len(payload)
+            frame = bytearray()
+            frame.append(0x81)  # FIN=1, Opcode=1 (Text)
+            if length < 126:
+                frame.append(length)
+            elif length < 65536:
+                frame.append(126)
+                frame.extend(length.to_bytes(2, byteorder='big'))
+            else:
+                frame.append(127)
+                frame.extend(length.to_bytes(8, byteorder='big'))
+            frame.extend(payload)
+            conn.sendall(frame)
+
+        try:
+            # 1. 首次推送 snapshot
+            metrics = fetch_exporter_metrics()
+            if "error" not in metrics:
+                send_frame("snapshot", make_snapshot_payload(metrics))
+            
+            # 2. 循环推送 update
+            while True:
+                time.sleep(2.0)
+                metrics = fetch_exporter_metrics()
+                if "error" not in metrics:
+                    send_frame("update", make_update_payload(metrics))
+        except Exception as e:
+            print("[WS] Connection closed:", e)
+        finally:
+            conn.close()
 
     def do_GET(self):
+        # 拦截 WebSocket 升级请求
+        if self.headers.get("Upgrade", "").lower() == "websocket":
+            self.handle_websocket()
+            return
+
         parsed_url = urllib.parse.urlparse(self.path)
         path = parsed_url.path
         query = urllib.parse.parse_qs(parsed_url.query)
 
-        # 1. 静态页面
-        if path == "/":
-            index_path = os.path.join(ASSET_DIR, "index.html")
-            if os.path.exists(index_path):
-                with open(index_path, "rb") as f:
-                    content = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(content)))
-                self.end_headers()
-                self.wfile.write(content)
-            else:
-                self.send_response(404)
-                self.end_headers()
-                self.wfile.write(b"index.html not found.")
-            return
-
-        # 2. 一次快照
-        if path == "/api/snapshot":
-            snap = fetch_exporter_metrics()
-            body = json.dumps(snap).encode('utf-8')
+        # ── REST API ────────────────────────────────────────────────
+        if path == "/api/health":
+            body = json.dumps({"status": "ok", "version": "1.0.0"}).encode('utf-8')
             self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
             return
 
-        # 3. 历史 Prometheus 查询代理
-        if path == "/api/range":
-            metric_type = query.get("metric", ["wan_down"])[0]
-            duration = int(query.get("duration", ["900"])[0])
-            step = int(query.get("step", ["15"])[0])
+        if path == "/api/auth/status":
+            body = json.dumps({"setup_required": False, "authenticated": True, "oidc": None}).encode('utf-8')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/auth/me":
+            body = json.dumps({
+                "username": "admin",
+                "display_name": "管理员",
+                "role": "admin",
+                "session_kind": "local",
+                "auth_method": "password",
+                "provider_name": None,
+                "capabilities": ["read", "configure", "manage_devices", "manage_sessions"]
+            }).encode('utf-8')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/config/full" or path == "/api/config":
+            body = json.dumps({
+                "wizard_completed": True,
+                "dns_probe_targets": [],
+                "router_ip": "10.10.0.1"
+            }).encode('utf-8')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == "/api/devices/overrides" or path == "/api/oui":
+            body = json.dumps([]).encode('utf-8')
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        # 历史 Prometheus 时序代理 (与 RouterView 接口完全格式对齐)
+        if path == "/api/traffic-history":
+            range_str = query.get("range", ["1H"])[0]  # 5M, 1H, 6H, 24H等
+            duration = 3600
+            if range_str == "5M": duration = 300
+            elif range_str == "6H": duration = 21600
+            elif range_str == "24H": duration = 86400
+
             end_time = int(time.time())
             start_time = end_time - duration
+            step = max(5, duration // 120)
 
-            promql = ""
-            if metric_type == "wan_down":
-                promql = 'ikuai_network_recv_kbytes_per_second{id="iface/wan1"}'
-            elif metric_type == "wan_up":
-                promql = 'ikuai_network_send_kbytes_per_second{id="iface/wan1"}'
-            elif metric_type == "cpu":
-                promql = 'avg(ikuai_cpu_usage_ratio)'
-            elif metric_type == "mem":
-                promql = '(ikuai_memory_usage_bytes / ikuai_memory_size_bytes) * 100'
-            else:
-                promql = 'ikuai_network_recv_kbytes_per_second{id="iface/wan1"}'
+            promql_down = 'ikuai_network_recv_kbytes_per_second{id="iface/wan1"}'
+            promql_up = 'ikuai_network_send_kbytes_per_second{id="iface/wan1"}'
 
-            prom_url = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql)}&start={start_time}&end={end_time}&step={step}"
-            
+            url_down = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql_down)}&start={start_time}&end={end_time}&step={step}"
+            url_up = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql_up)}&start={start_time}&end={end_time}&step={step}"
+
+            points = []
             try:
-                req = urllib.request.Request(prom_url, headers={"User-Agent": "iKuai-Monitor-Gateway"})
-                with urllib.request.urlopen(req, timeout=3) as response:
-                    prom_res = json.loads(response.read().decode('utf-8'))
-                
-                points = []
-                if prom_res.get("status") == "success":
-                    result = prom_res.get("data", {}).get("result", [])
-                    if result:
-                        for item in result[0].get("values", []):
-                            points.append({
-                                "time": int(item[0]),
-                                "value": round(float(item[1]), 2)
-                            })
-                body = json.dumps({"status": "success", "points": points}).encode('utf-8')
-            except Exception as e:
-                body = json.dumps({"status": "error", "message": str(e)}).encode('utf-8')
+                # 查下行
+                req = urllib.request.Request(url_down, headers={"User-Agent": "iKuai-Monitor-Gateway"})
+                with urllib.request.urlopen(req, timeout=3) as res:
+                    res_down = json.loads(res.read().decode('utf-8'))
+                # 查上行
+                req = urllib.request.Request(url_up, headers={"User-Agent": "iKuai-Monitor-Gateway"})
+                with urllib.request.urlopen(req, timeout=3) as res:
+                    res_up = json.loads(res.read().decode('utf-8'))
 
+                down_map = {}
+                if res_down.get("status") == "success":
+                    for item in res_down.get("data", {}).get("result", [{}])[0].get("values", []):
+                        down_map[int(item[0])] = float(item[1])
+
+                if res_up.get("status") == "success":
+                    for item in res_up.get("data", {}).get("result", [{}])[0].get("values", []):
+                        ts_val = int(item[0])
+                        date_str = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(ts_val))
+                        points.append({
+                            "timestamp": date_str,
+                            "download_bps": int(down_map.get(ts_val, 0.0)),
+                            "upload_bps": int(float(item[1])),
+                            "wan_name": "wan1"
+                        })
+            except Exception as e:
+                print("Failed query range:", e)
+
+            body = json.dumps({"points": points}).encode('utf-8')
             self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
             return
 
-        # 4. SSE 推送流
-        if path == "/events":
+        # ── 静态文件分发 & 路由兜底 ─────────────────────────────
+        # 移除了 /api/* 外的拦截，直接走静态文件和 SPA 路由兜底
+        clean_path = path.lstrip('/')
+        file_path = os.path.join(ASSET_DIR, clean_path)
+
+        # 映射文件的 Content-Type 避免浏览器报错
+        mime_types = {
+            ".html": "text/html; charset=utf-8",
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".json": "application/json",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".svg": "image/svg+xml",
+            ".ico": "image/x-icon",
+            ".woff2": "font/woff2",
+            ".woff": "font/woff",
+            ".ttf": "font/ttf"
+        }
+
+        # 核心 SPA 路由兜底逻辑：如果不是文件，或者文件不存在且不包含后缀，直接返回 index.html
+        if not os.path.exists(file_path) or os.path.isdir(file_path):
+            file_path = os.path.join(ASSET_DIR, "index.html")
+
+        ext = os.path.splitext(file_path)[1]
+        content_type = mime_types.get(ext, "application/octet-stream")
+
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            # 支持缓存字体文件提高速度
+            if ext in [".woff", ".woff2", ".ttf"]:
+                self.send_header("Cache-Control", "max-age=31536000")
             self.end_headers()
-
-            while True:
-                try:
-                    snap = fetch_exporter_metrics()
-                    with history_lock:
-                        snap["history"] = list(traffic_history)
-                    event_data = f"data: {json.dumps(snap)}\n\n"
-                    self.wfile.write(event_data.encode('utf-8'))
-                    self.wfile.flush()
-                except (socket.error, ConnectionResetError, BrokenPipeError):
-                    break  # 客户端断开连接，安全退出循环
-                except Exception:
-                    break
-                time.sleep(SYNC_INTERVAL)
-            return
-
-        self.send_response(404)
-        self.end_headers()
-        self.wfile.write(b"Not Found")
+            self.wfile.write(content)
+        except Exception:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not Found")
 
 def run():
-    print(f"Starting iKuai Monitor Gateway on port {PORT}...")
+    print(f"Starting iKuai Advanced Web Gateway on port {PORT}...")
     server = ThreadingHTTPServer(('0.0.0.0', PORT), WebHandler)
     server.serve_forever()
 

@@ -1,0 +1,1 @@
+const n="/login/oidc/complete",e=new TextEncoder;function r(t){return new URL(t,"https://routerview.invalid").pathname.replace(/\/+$/,"").toLowerCase()===n}function o(t){return typeof t!="string"||t.length===0||t.length>2048||e.encode(t).byteLength>2048||!t.startsWith("/")||t.startsWith("//")||t.includes("\\")||new RegExp("\\p{Cc}","u").test(t)||r(t)?"/":t}export{o as s};
