@@ -4,7 +4,7 @@ WORKDIR /app
 
 # 拷贝网关代码和前端资源
 COPY gateway.py .
-COPY index.html .
+COPY dist ./dist
 
 # 设置可执行权限
 RUN chmod +x gateway.py
