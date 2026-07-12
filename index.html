@@ -533,7 +533,7 @@
           let res = params[0].name + '<br/>';
           params.forEach(item => {
             res += `<span style="display:inline-block;margin-right:4px;border-radius:10px;width:10px;height:10px;background-color:${item.color};"></span>`;
-            res += `${item.seriesName}: <b>${formatBytes(item.value * 1024)}/s</b><br/>`;
+            res += `${item.seriesName}: <b>${formatBytes(item.value)}/s</b><br/>`;
           });
           return res;
         }
@@ -564,7 +564,7 @@
         axisLabel: {
           color: '#969db3',
           formatter: function (value) {
-            return formatBytes(value * 1024);
+            return formatBytes(value);
           }
         }
       },
@@ -695,8 +695,8 @@
       // 实时 WAN 上下行值
       const downKB = data.wan_speed.down || 0;
       const upKB = data.wan_speed.up || 0;
-      document.getElementById('wan-down-speed').innerText = `${formatBytes(downKB * 1024)}/s`;
-      document.getElementById('wan-up-speed').innerText = `${formatBytes(upKB * 1024)}/s`;
+      document.getElementById('wan-down-speed').innerText = `${formatBytes(downKB)}/s`;
+      document.getElementById('wan-up-speed').innerText = `${formatBytes(upKB)}/s`;
 
       // 如果当前是实时模式，动态累加并重绘 ECharts
       if (chartMode === 'realtime') {
@@ -876,8 +876,8 @@
             </div>
           </td>
           <td><span class="dev-ip">${dev.ip}</span></td>
-          <td><span class="dev-rate rate-down">${formatBytes(dev.down_rate * 1024)}/s</span></td>
-          <td><span class="dev-rate rate-up">${formatBytes(dev.up_rate * 1024)}/s</span></td>
+          <td><span class="dev-rate rate-down">${formatBytes(dev.down_rate)}/s</span></td>
+          <td><span class="dev-rate rate-up">${formatBytes(dev.up_rate)}/s</span></td>
           <td><span class="dev-conns">${dev.conns}</span></td>
         `;
         tbody.appendChild(tr);
