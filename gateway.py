@@ -22,7 +22,7 @@ IKUAI_URL      = os.environ.get("IKUAI_URL", "http://10.10.0.1")
 IKUAI_USER     = os.environ.get("IKUAI_USERNAME", "api")
 IKUAI_PASS     = os.environ.get("IKUAI_PASSWORD", "")
 
-# 静态设备别名表（作为兜底）
+# 静态设备别名表（作为最后兜底）
 STATIC_ALIASES = {
     "10.10.0.1": "爱快主路由",
     "10.10.0.2": "群晖NAS (LZY)",
@@ -38,86 +38,140 @@ STATIC_ALIASES = {
 device_metadata_cache = {}
 cache_lock = threading.Lock()
 
-def ikuai_metadata_poller():
-    """后台轮询爱快 API，同步真实设备名称(termname)及类型"""
-    print("[Poller] Starting iKuai API metadata poller thread...")
-    sess_key = None
-    passwd_md5 = hashlib.md5(IKUAI_PASS.encode('utf-8')).hexdigest() if IKUAI_PASS else ""
-    
-    while True:
-        if not IKUAI_PASS:
-            print("[Poller] IKUAI_PASSWORD is not set. Metadata polling skipped.")
-            time.sleep(10.0)
-            continue
+def fetch_ikuai_metadata():
+    """登录并从爱快获取：1) DHCP静态分配列表  2) 实时在线客户端监控。
+    从中提取 MAC、IP 对齐自定义备注，写入本地缓存。
+    """
+    if not IKUAI_PASS:
+        return None
 
+    sess_key = None
+    passwd_md5 = hashlib.md5(IKUAI_PASS.encode('utf-8')).hexdigest()
+    
+    # 1. 登录
+    try:
+        login_payload = {"username": IKUAI_USER, "passwd": passwd_md5}
+        req = urllib.request.Request(
+            f"{IKUAI_URL}/Action/login",
+            data=json.dumps(login_payload).encode('utf-8'),
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            res_headers = res.info()
+            cookies = res_headers.get_all("Set-Cookie", []) or []
+            for c in cookies:
+                if "sess_key" in c:
+                    parts = c.split(";")
+                    for p in parts:
+                        if p.strip().startswith("sess_key="):
+                            sess_key = p.strip().split("=")[1]
+                            break
+    except Exception as e:
+        print("[Poller] Login failed:", e)
+        return None
+
+    if not sess_key:
+        print("[Poller] Login failed: sess_key not found in cookie header.")
+        return None
+
+    cookie_str = f"sess_key={sess_key}"
+    new_cache = {}
+
+    # 2. 拉取 DHCP 静态绑定分配列表 (dhcp_static)
+    try:
+        static_payload = {
+            "action": "show",
+            "func_name": "dhcp_static",
+            "param": {
+                "TYPE": "data,total",
+                "limit": "0,1000"
+            }
+        }
+        req = urllib.request.Request(
+            f"{IKUAI_URL}/Action/call",
+            data=json.dumps(static_payload).encode('utf-8'),
+            headers={"Content-Type": "application/json", "Cookie": cookie_str, "User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            body = json.loads(res.read().decode('utf-8'))
+            static_list = body.get("results", {}).get("data", [])
+            for item in static_list:
+                mac = item.get("mac", "").lower()
+                if mac:
+                    new_cache[mac] = {
+                        "termname": item.get("termname", ""),
+                        "comment": item.get("comment", ""),
+                        "hostname": item.get("hostname", ""),
+                        "ip": item.get("ip_addr", ""),
+                        "static_bind": True,
+                        "client_type": "desktop"
+                    }
+    except Exception as e:
+        print("[Poller] Fetch dhcp_static failed:", e)
+
+    # 3. 拉取实时在线客户端列表 (monitor_lanip)
+    try:
+        dev_payload = {
+            "action": "show",
+            "func_name": "monitor_lanip",
+            "param": {
+                "TYPE": "data,total",
+                "limit": "0,1000"
+            }
+        }
+        req = urllib.request.Request(
+            f"{IKUAI_URL}/Action/call",
+            data=json.dumps(dev_payload).encode('utf-8'),
+            headers={"Content-Type": "application/json", "Cookie": cookie_str, "User-Agent": "Mozilla/5.0"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as res:
+            body = json.loads(res.read().decode('utf-8'))
+            dev_list = body.get("results", {}).get("data", [])
+            for dev in dev_list:
+                mac = dev.get("mac", "").lower()
+                if not mac:
+                    continue
+                
+                # 如果这个设备已经存在于静态绑定列表中，我们将在线状态合并
+                if mac in new_cache:
+                    new_cache[mac]["client_type"] = dev.get("client_type", "desktop")
+                    new_cache[mac]["vendor"] = dev.get("client_vendor", "")
+                    # 如果静态绑定列表里没有改 termname 备注，但是在线客户端改了，我们就补充
+                    if not new_cache[mac]["termname"]:
+                        new_cache[mac]["termname"] = dev.get("termname", "")
+                    if not new_cache[mac]["comment"]:
+                        new_cache[mac]["comment"] = dev.get("comment", "")
+                    if not new_cache[mac]["hostname"]:
+                        new_cache[mac]["hostname"] = dev.get("hostname", "")
+                else:
+                    new_cache[mac] = {
+                        "termname": dev.get("termname", ""),
+                        "comment": dev.get("comment", ""),
+                        "hostname": dev.get("hostname", ""),
+                        "ip": dev.get("ip_addr", ""),
+                        "static_bind": False,
+                        "client_type": dev.get("client_type", "desktop"),
+                        "vendor": dev.get("client_vendor", "")
+                    }
+    except Exception as e:
+        print("[Poller] Fetch monitor_lanip failed:", e)
+
+    # 4. 更新全局缓存
+    if new_cache:
+        with cache_lock:
+            global device_metadata_cache
+            device_metadata_cache = new_cache
+        print(f"[Poller] Successfully synced {len(new_cache)} device metadata records from iKuai API.")
+
+def ikuai_metadata_poller():
+    while True:
         try:
-            # 1. 登录
-            if not sess_key:
-                login_payload = {"username": IKUAI_USER, "passwd": passwd_md5}
-                req = urllib.request.Request(
-                    f"{IKUAI_URL}/Action/login",
-                    data=json.dumps(login_payload).encode('utf-8'),
-                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
-                )
-                with urllib.request.urlopen(req, timeout=5) as res:
-                    res_headers = res.info()
-                    cookies = res_headers.get_all("Set-Cookie", []) or []
-                    for c in cookies:
-                        if "sess_key" in c:
-                            parts = c.split(";")
-                            for p in parts:
-                                if p.strip().startswith("sess_key="):
-                                    sess_key = p.strip().split("=")[1]
-                                    break
-            
-            # 2. 查询在线设备
-            if sess_key:
-                dev_payload = {
-                    "action": "show",
-                    "func_name": "monitor_lanip",
-                    "param": {
-                        "TYPE": "data,total",
-                        "limit": "0,1000"
-                    }
-                }
-                req = urllib.request.Request(
-                    f"{IKUAI_URL}/Action/call",
-                    data=json.dumps(dev_payload).encode('utf-8'),
-                    headers={
-                        "Content-Type": "application/json",
-                        "Cookie": f"sess_key={sess_key}",
-                        "User-Agent": "Mozilla/5.0"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=5) as res:
-                    body = json.loads(res.read().decode('utf-8'))
-                    if body.get("code") == 1008 or body.get("Result") == 10000:
-                        sess_key = None
-                        continue
-                    
-                    dev_list = body.get("results", {}).get("data", [])
-                    new_cache = {}
-                    for dev in dev_list:
-                        mac = dev.get("mac", "").lower()
-                        if mac:
-                            new_cache[mac] = {
-                                "termname": dev.get("termname", ""),
-                                "comment": dev.get("comment", ""),
-                                "hostname": dev.get("hostname", ""),
-                                "vendor": dev.get("client_vendor", ""),
-                                "client_type": dev.get("client_type", "")
-                            }
-                    
-                    with cache_lock:
-                        global device_metadata_cache
-                        device_metadata_cache = new_cache
+            fetch_ikuai_metadata()
         except Exception as e:
-            print("[Poller] Metadata sync failed:", e)
-            sess_key = None  # 遇错清除 key 重新登录
-            
+            print("[Poller] Error in poller cycle:", e)
         time.sleep(10.0)
 
-# 启动轮询线程
+# 启动 poller 线程
 poller_thread = threading.Thread(target=ikuai_metadata_poller, daemon=True)
 poller_thread.start()
 
@@ -171,7 +225,7 @@ def fetch_exporter_metrics():
             mem_used = val
         elif metric_part.startswith("ikuai_device_count"):
             data["device_count"] = int(val)
-        elif metric_part.startswith("ikuai_uptime{id=\"host\"}"):
+        elif metric_part.startswith("ikuai_uptime{id="host"}"):
             data["uptime"] = int(val)
         elif metric_part.startswith("ikuai_version"):
             m = re.search(r'verstring="([^"]+)"', metric_part)
@@ -240,8 +294,8 @@ def fetch_exporter_metrics():
                 
                 # 映射设备图标类型
                 dev_type = "desktop"
-                vendor = metadata.get("vendor", "").lower()
-                c_type = metadata.get("client_type", "").lower()
+                vendor = metadata.get("vendor", "").lower() if metadata.get("vendor") else ""
+                c_type = metadata.get("client_type", "").lower() if metadata.get("client_type") else ""
                 term = name.lower()
                 
                 if "phone" in c_type or "ios" in c_type or "android" in c_type:
@@ -260,6 +314,7 @@ def fetch_exporter_metrics():
                     dev_type = "switch"
                     
                 devices_map[ip]["device_type"] = dev_type
+                devices_map[ip]["static_bind"] = metadata.get("static_bind", False)
 
     if cpu_cores:
         data["cpu_usage"] = sum(cpu_cores) / len(cpu_cores)
@@ -277,6 +332,7 @@ def fetch_exporter_metrics():
         dev["up_rate"] = dev.get("up_rate", 0.0)
         dev["conns"] = dev.get("conns", 0)
         dev["device_type"] = dev.get("device_type", "desktop")
+        dev["static_bind"] = dev.get("static_bind", False)
         devices_list.append(dev)
     
     # 彻底不进行排序，直接全量返回由 Vue 接管
@@ -296,7 +352,7 @@ def make_snapshot_payload(data):
             "device_type": dev["device_type"],
             "signal": None,
             "connected_duration": 3600,
-            "dhcp_status": "bound",
+            "dhcp_status": "bound" if not dev["static_bind"] else "static",
             "dhcp_expires": None,
             "interface": "lan1",
             "arp_status": "reachable",
