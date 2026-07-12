@@ -1,4 +1,4 @@
-# RouterView — iKuai 看板 (容器3)
+# iKuaiView 看板 (容器3)
 
 RouterView 是一个为 **iKuai 爱快流控路由器** 深度定制的极轻量、响应式、实时网络监控面板。
 
@@ -31,7 +31,7 @@ RouterView 是一个为 **iKuai 爱快流控路由器** 深度定制的极轻量
 docker-compose up -d --build
 ```
 
-### 2. 容器3 (`ikuai-routerview`) 关键变量说明
+### 2. 容器3 (`ikuaiview`) 关键变量说明
 如果你已在群晖或 PVE 的 Portainer 中运行了容器1与容器2，只需新建此容器，并传入以下环境变量：
 
 | 环境变量 | 默认值 | 作用 |

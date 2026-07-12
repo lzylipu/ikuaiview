@@ -58,10 +58,10 @@ services:
     networks:
       - ikuai-monitor
 
-  # ===== 4. ikuai-routerview: 容器3 (借用视觉样式的轻量级爱快网络看板) =====
-  ikuai-routerview:
+  # ===== 4. ikuaiview: 容器3 (借用视觉样式的轻量级爱快网络看板) =====
+  ikuaiview:
     build: .
-    container_name: ikuai-routerview
+    container_name: ikuaiview
     restart: always
     environment:
       # 对接局域网内的容器 1 和 容器 2 接口
