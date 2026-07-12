@@ -67,6 +67,9 @@ services:
       # 对接局域网内的容器 1 和 容器 2 接口
       IKUAI_EXPORTER_URL: "http://10.10.0.2:9191"
       PROMETHEUS_URL: "http://10.10.0.2:9192"
+      IKUAI_URL: "http://10.10.0.1"
+      IKUAI_USERNAME: "api"
+      IKUAI_PASSWORD: "zz123123"
       PORT: "9193"
     ports:
       - "9193:9193"

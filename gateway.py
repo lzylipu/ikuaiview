@@ -18,7 +18,11 @@ PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL",     "http://10.10.0.2:9192")
 PORT           = int(os.environ.get("IKUAI_PORT", "9193"))
 ASSET_DIR      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
-# 静态设备别名表（若未在爱快中配备注，则以此为准）
+IKUAI_URL      = os.environ.get("IKUAI_URL", "http://10.10.0.1")
+IKUAI_USER     = os.environ.get("IKUAI_USERNAME", "api")
+IKUAI_PASS     = os.environ.get("IKUAI_PASSWORD", "")
+
+# 静态设备别名表（作为兜底）
 STATIC_ALIASES = {
     "10.10.0.1": "爱快主路由",
     "10.10.0.2": "群晖NAS (LZY)",
@@ -29,6 +33,93 @@ STATIC_ALIASES = {
     "10.10.0.8": "LXC测试主机",
     "10.10.0.10": "我的PC电脑"
 }
+
+# 全局的设备备注和类型缓存
+device_metadata_cache = {}
+cache_lock = threading.Lock()
+
+def ikuai_metadata_poller():
+    """后台轮询爱快 API，同步真实设备名称(termname)及类型"""
+    print("[Poller] Starting iKuai API metadata poller thread...")
+    sess_key = None
+    passwd_md5 = hashlib.md5(IKUAI_PASS.encode('utf-8')).hexdigest() if IKUAI_PASS else ""
+    
+    while True:
+        if not IKUAI_PASS:
+            print("[Poller] IKUAI_PASSWORD is not set. Metadata polling skipped.")
+            time.sleep(10.0)
+            continue
+
+        try:
+            # 1. 登录
+            if not sess_key:
+                login_payload = {"username": IKUAI_USER, "passwd": passwd_md5}
+                req = urllib.request.Request(
+                    f"{IKUAI_URL}/Action/login",
+                    data=json.dumps(login_payload).encode('utf-8'),
+                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req, timeout=5) as res:
+                    res_headers = res.info()
+                    cookies = res_headers.get_all("Set-Cookie", []) or []
+                    for c in cookies:
+                        if "sess_key" in c:
+                            parts = c.split(";")
+                            for p in parts:
+                                if p.strip().startswith("sess_key="):
+                                    sess_key = p.strip().split("=")[1]
+                                    break
+            
+            # 2. 查询在线设备
+            if sess_key:
+                dev_payload = {
+                    "action": "show",
+                    "func_name": "monitor_lanip",
+                    "param": {
+                        "TYPE": "data,total",
+                        "limit": "0,1000"
+                    }
+                }
+                req = urllib.request.Request(
+                    f"{IKUAI_URL}/Action/call",
+                    data=json.dumps(dev_payload).encode('utf-8'),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Cookie": f"sess_key={sess_key}",
+                        "User-Agent": "Mozilla/5.0"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=5) as res:
+                    body = json.loads(res.read().decode('utf-8'))
+                    if body.get("code") == 1008 or body.get("Result") == 10000:
+                        sess_key = None
+                        continue
+                    
+                    dev_list = body.get("results", {}).get("data", [])
+                    new_cache = {}
+                    for dev in dev_list:
+                        mac = dev.get("mac", "").lower()
+                        if mac:
+                            new_cache[mac] = {
+                                "termname": dev.get("termname", ""),
+                                "comment": dev.get("comment", ""),
+                                "hostname": dev.get("hostname", ""),
+                                "vendor": dev.get("client_vendor", ""),
+                                "client_type": dev.get("client_type", "")
+                            }
+                    
+                    with cache_lock:
+                        global device_metadata_cache
+                        device_metadata_cache = new_cache
+        except Exception as e:
+            print("[Poller] Metadata sync failed:", e)
+            sess_key = None  # 遇错清除 key 重新登录
+            
+        time.sleep(10.0)
+
+# 启动轮询线程
+poller_thread = threading.Thread(target=ikuai_metadata_poller, daemon=True)
+poller_thread.start()
 
 def fetch_exporter_metrics():
     try:
@@ -100,7 +191,6 @@ def fetch_exporter_metrics():
             m = re.search(r'id="([^"]+)"', metric_part)
             if m:
                 target_id = m.group(1)
-                # exporter 里的这一字段实际吐的是 Bytes/s
                 if target_id.startswith("device/"):
                     ip = target_id.replace("device/", "")
                     if ip not in devices_map: devices_map[ip] = {}
@@ -132,15 +222,44 @@ def fetch_exporter_metrics():
         elif metric_part.startswith("ikuai_device_info"):
             labels = dict(re.findall(r'(\w+)="([^"]*)"', metric_part))
             ip = labels.get("ip_addr", "")
+            mac = labels.get("mac", "").lower()
             if ip:
                 if ip not in devices_map: devices_map[ip] = {}
                 devices_map[ip]["ip"] = ip
-                devices_map[ip]["mac"] = labels.get("mac", "")
-                hostname = labels.get("hostname", "")
-                comment = labels.get("comment", "")
-                h_name = urllib.parse.unquote(hostname) if hostname else ""
-                c_name = urllib.parse.unquote(comment) if comment else ""
-                devices_map[ip]["name"] = c_name or h_name or STATIC_ALIASES.get(ip) or ip
+                devices_map[ip]["mac"] = mac
+                
+                # 从本地 API 缓存合并真实名称
+                metadata = {}
+                with cache_lock:
+                    metadata = device_metadata_cache.get(mac, {})
+                
+                # 优先级：爱快改名 (termname) > 静态备注 (comment) > 客户端主机名 (hostname) > 静态硬编码别名
+                name = metadata.get("termname") or metadata.get("comment") or metadata.get("hostname") or STATIC_ALIASES.get(ip) or ip
+                name = urllib.parse.unquote(name) if name else ip
+                devices_map[ip]["name"] = name
+                
+                # 映射设备图标类型
+                dev_type = "desktop"
+                vendor = metadata.get("vendor", "").lower()
+                c_type = metadata.get("client_type", "").lower()
+                term = name.lower()
+                
+                if "phone" in c_type or "ios" in c_type or "android" in c_type:
+                    dev_type = "phone"
+                elif "camera" in term or "摄像头" in term:
+                    dev_type = "camera"
+                elif "投影" in term or "电视" in term or "tv" in term:
+                    dev_type = "media"
+                elif "插座" in term or "空调" in term or "扫地机" in term or "xiaomi" in vendor:
+                    dev_type = "iot"
+                elif "proxmox" in vendor or "vmware" in vendor or "server" in term:
+                    dev_type = "desktop"
+                elif "zte" in vendor or "router" in term or "route" in term or "wrt" in term:
+                    dev_type = "router"
+                elif "switch" in term or "交换" in term:
+                    dev_type = "switch"
+                    
+                devices_map[ip]["device_type"] = dev_type
 
     if cpu_cores:
         data["cpu_usage"] = sum(cpu_cores) / len(cpu_cores)
@@ -157,9 +276,10 @@ def fetch_exporter_metrics():
         dev["down_rate"] = dev.get("down_rate", 0.0)
         dev["up_rate"] = dev.get("up_rate", 0.0)
         dev["conns"] = dev.get("conns", 0)
+        dev["device_type"] = dev.get("device_type", "desktop")
         devices_list.append(dev)
     
-    devices_list.sort(key=lambda x: x["down_rate"], reverse=True)
+    # 彻底不进行排序，直接全量返回由 Vue 接管
     data["devices"] = devices_list
     return data
 
@@ -173,7 +293,7 @@ def make_snapshot_payload(data):
             "mac": dev["mac"],
             "hostname": dev["name"],
             "ip": dev["ip"],
-            "device_type": "wired",
+            "device_type": dev["device_type"],
             "signal": None,
             "connected_duration": 3600,
             "dhcp_status": "bound",
@@ -353,7 +473,6 @@ class WebHandler(BaseHTTPRequestHandler):
         return
 
     def handle_websocket(self):
-        # WebSocket 握手
         key = self.headers.get("Sec-WebSocket-Key")
         guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         accept = base64.b64encode(hashlib.sha1((key + guid).encode('utf-8')).digest()).decode('utf-8')
@@ -363,7 +482,6 @@ class WebHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Connection: Upgrade\r\n")
         self.wfile.write(f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode('utf-8'))
         
-        # 握手完成，切换为非阻塞 WebSocket 发送环
         conn = self.connection
         conn.setblocking(True)
         print("[WS] Connection upgraded successfully.")
@@ -403,7 +521,6 @@ class WebHandler(BaseHTTPRequestHandler):
             conn.close()
 
     def do_GET(self):
-        # 拦截 WebSocket 升级请求
         if self.headers.get("Upgrade", "").lower() == "websocket":
             self.handle_websocket()
             return
@@ -470,9 +587,9 @@ class WebHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        # 历史 Prometheus 时序代理 (与 RouterView 接口完全格式对齐)
+        # 历史 Prometheus 时序代理
         if path == "/api/traffic-history":
-            range_str = query.get("range", ["1H"])[0]  # 5M, 1H, 6H, 24H等
+            range_str = query.get("range", ["1H"])[0]
             duration = 3600
             if range_str == "5M": duration = 300
             elif range_str == "6H": duration = 21600
@@ -485,16 +602,15 @@ class WebHandler(BaseHTTPRequestHandler):
             promql_down = 'ikuai_network_recv_kbytes_per_second{id="iface/wan1"}'
             promql_up = 'ikuai_network_send_kbytes_per_second{id="iface/wan1"}'
 
-            url_down = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql_down)}&start={start_time}&end={end_time}&step={step}"
-            url_up = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql_up)}&start={start_time}&end={end_time}&step={step}"
+            AMP = chr(38)
+            url_down = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql_down)}{AMP}start={start_time}{AMP}end={end_time}{AMP}step={step}"
+            url_up = f"{PROMETHEUS_URL}/api/v1/query_range?query={urllib.parse.quote(promql_up)}{AMP}start={start_time}{AMP}end={end_time}{AMP}step={step}"
 
             points = []
             try:
-                # 查下行
                 req = urllib.request.Request(url_down, headers={"User-Agent": "iKuai-Monitor-Gateway"})
                 with urllib.request.urlopen(req, timeout=3) as res:
                     res_down = json.loads(res.read().decode('utf-8'))
-                # 查上行
                 req = urllib.request.Request(url_up, headers={"User-Agent": "iKuai-Monitor-Gateway"})
                 with urllib.request.urlopen(req, timeout=3) as res:
                     res_up = json.loads(res.read().decode('utf-8'))
@@ -527,11 +643,9 @@ class WebHandler(BaseHTTPRequestHandler):
             return
 
         # ── 静态文件分发 & 路由兜底 ─────────────────────────────
-        # 移除了 /api/* 外的拦截，直接走静态文件和 SPA 路由兜底
         clean_path = path.lstrip('/')
         file_path = os.path.join(ASSET_DIR, clean_path)
 
-        # 映射文件的 Content-Type 避免浏览器报错
         mime_types = {
             ".html": "text/html; charset=utf-8",
             ".css": "text/css; charset=utf-8",
@@ -546,7 +660,6 @@ class WebHandler(BaseHTTPRequestHandler):
             ".ttf": "font/ttf"
         }
 
-        # 核心 SPA 路由兜底逻辑：如果不是文件，或者文件不存在且不包含后缀，直接返回 index.html
         if not os.path.exists(file_path) or os.path.isdir(file_path):
             file_path = os.path.join(ASSET_DIR, "index.html")
 
@@ -559,7 +672,6 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
-            # 支持缓存字体文件提高速度
             if ext in [".woff", ".woff2", ".ttf"]:
                 self.send_header("Cache-Control", "max-age=31536000")
             self.end_headers()
