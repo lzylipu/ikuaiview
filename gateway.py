@@ -225,7 +225,7 @@ def fetch_exporter_metrics():
             mem_used = val
         elif metric_part.startswith("ikuai_device_count"):
             data["device_count"] = int(val)
-        elif metric_part.startswith("ikuai_uptime{id="host"}"):
+        elif metric_part.startswith('ikuai_uptime{id="host"}'):
             data["uptime"] = int(val)
         elif metric_part.startswith("ikuai_version"):
             m = re.search(r'verstring="([^"]+)"', metric_part)
