@@ -18,6 +18,18 @@ PORT           = int(os.environ.get("IKUAI_PORT", "9193"))
 SYNC_INTERVAL  = 2.0
 ASSET_DIR      = os.path.dirname(os.path.abspath(__file__))
 
+# 静态别名映射表（用于静态IP或未走DHCP的核心设备）
+STATIC_ALIASES = {
+    "10.10.0.1": "爱快主路由",
+    "10.10.0.2": "群晖NAS (LZY)",
+    "10.10.0.3": "新旁路由 (AGH/Clash)",
+    "10.10.0.4": "备用老路由",
+    "10.10.0.6": "备用旁路由",
+    "10.10.0.7": "Docker-all宿主",
+    "10.10.0.8": "LXC测试主机",
+    "10.10.0.10": "我的PC电脑"
+}
+
 history_lock = threading.Lock()
 traffic_history = deque(maxlen=60)
 
@@ -123,7 +135,14 @@ def fetch_exporter_metrics():
                 devices_map[ip]["ip"] = ip
                 devices_map[ip]["mac"] = labels.get("mac", "")
                 hostname = labels.get("hostname", "")
-                devices_map[ip]["name"] = urllib.parse.unquote(hostname) if hostname else labels.get("comment", "") or ip
+                comment = labels.get("comment", "")
+                
+                h_name = urllib.parse.unquote(hostname) if hostname else ""
+                c_name = urllib.parse.unquote(comment) if comment else ""
+                
+                # 优先级: 爱快后台备注 -> DHCP主机名 -> 本地静态字典 -> IP地址
+                resolved_name = c_name or h_name or STATIC_ALIASES.get(ip) or ip
+                devices_map[ip]["name"] = resolved_name
 
     if cpu_cores:
         data["cpu_usage"] = sum(cpu_cores) / len(cpu_cores)
