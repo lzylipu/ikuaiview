@@ -6,9 +6,9 @@ cd "$ROOT"
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "Created .env from .env.example — edit IKUAI_URL / USERNAME / PASSWORD before start."
+  echo "✅ Created .env from .env.example — edit IKUAI_URL / USERNAME / PASSWORD before start."
 else
-  echo ".env already exists"
+  echo "ℹ️  .env already exists"
 fi
 
 mkdir -p prometheus prometheus-data
@@ -25,14 +25,17 @@ scrape_configs:
       - targets:
           - ikuai-exporter:9090
 EOF
-  echo "Created prometheus/prometheus.yml"
+  echo "✅ Created prometheus/prometheus.yml"
 else
-  echo "prometheus/prometheus.yml already exists"
+  echo "ℹ️  prometheus/prometheus.yml already exists"
 fi
 
 chmod -R a+rwX prometheus-data 2>/dev/null || true
 echo
 echo "Next:"
-echo "  1) edit .env"
-echo "  2) docker-compose up -d --build"
-echo "  3) open http://<host>:3000"
+echo "  1) edit .env   (IKUAI_URL / IKUAI_USERNAME / IKUAI_PASSWORD)"
+echo "  2) docker-compose pull"
+echo "  3) docker-compose up -d"
+echo "  4) open http://<host>:3000"
+echo
+echo "Local build alternative: docker-compose up -d --build"
