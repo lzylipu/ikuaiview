@@ -1,6 +1,27 @@
+# secrets & local env
 .env
+.env.local
+.env.*.local
+
+# runtime data (created on first start)
 prometheus-data/
 grafana-data/
+*.db
+
+# python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# accidental build leftovers
 dist.bad-sed/
+*.log

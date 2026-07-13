@@ -1,8 +1,13 @@
+# Prometheus scrape config for iKuaiView
+# Target uses the Docker Compose service name + container port.
+# Do NOT point this at a host-mapped IP unless you know what you are doing.
+
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'ikuai'
+  - job_name: ikuai
     static_configs:
-      - targets: ['ikuai-exporter:9090']
+      - targets:
+          - ikuai-exporter:9090

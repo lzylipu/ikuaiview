@@ -1,55 +1,72 @@
-version: '3'
+# iKuaiView full stack
+# Services:
+#   1) jakes/ikuai-exporter  - scrape iKuai metrics
+#   2) prom/prometheus      - store WAN history
+#   3) ikuaiview            - dashboard + gateway (host port 3000)
+#
+# First-time setup:
+#   cp .env.example .env
+#   # edit .env with your iKuai read-only API credentials
+#   mkdir -p prometheus prometheus-data
+#   # prometheus/prometheus.yml is shipped; create only if missing
+#   docker-compose up -d --build
+#
+# Access: http://<host>:3000
+
+version: "3.8"
 
 services:
-  # ===== 1. ikuai-exporter: 采集器 =====
   ikuai-exporter:
     image: jakes/ikuai-exporter:latest
     container_name: ikuai-exporter
-    restart: always
+    restart: unless-stopped
     environment:
       IKUAI_URL: "${IKUAI_URL}"
       IKUAI_USERNAME: "${IKUAI_USERNAME}"
       IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
-      IKUAI_MODULES: "sysStat,lanDevice,interfaceInfo"
-      IKUAI_INSECURE_SKIP: "true"
-      IKUAI_LEVEL: "info"
+      IKUAI_MODULES: "${IKUAI_MODULES:-sysStat,lanDevice,interfaceInfo}"
+      IKUAI_INSECURE_SKIP: "${IKUAI_INSECURE_SKIP:-true}"
+      IKUAI_LEVEL: "${IKUAI_LEVEL:-info}"
     ports:
-      - "9191:9090"
+      - "${IKUAI_EXPORTER_PORT:-9191}:9090"
     networks:
       - ikuai-monitor
 
-  # ===== 2. Prometheus: 时序数据库 =====
   prometheus:
     image: prom/prometheus:latest
     container_name: ikuai-prometheus
-    restart: always
+    restart: unless-stopped
     user: "root"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus-data:/prometheus
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=30d'
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}"
+      - "--web.enable-lifecycle"
     ports:
-      - "9192:9090"
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - ikuai-exporter
     networks:
       - ikuai-monitor
 
-  # ===== 3. ikuaiview: 看板 =====
   ikuaiview:
     build: .
+    image: ikuaiview:latest
     container_name: ikuaiview
-    restart: always
+    restart: unless-stopped
     environment:
-      IKUAI_EXPORTER_URL: "http://ikuai-exporter:9090"
-      PROMETHEUS_URL: "http://prometheus:9090"
       IKUAI_URL: "${IKUAI_URL}"
       IKUAI_USERNAME: "${IKUAI_USERNAME}"
       IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
-      PORT: "9193"
+      # Prefer Docker DNS service names inside the compose network
+      IKUAI_EXPORTER_URL: "${IKUAI_EXPORTER_URL:-http://ikuai-exporter:9090}"
+      PROMETHEUS_URL: "${PROMETHEUS_URL:-http://prometheus:9090}"
+      IKUAI_PORT: "3000"
     ports:
-      - "9193:9193"
+      - "${IKUAIVIEW_PORT:-3000}:3000"
     depends_on:
       - ikuai-exporter
       - prometheus

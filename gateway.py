@@ -15,7 +15,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 # ── 配置 ─────────────────────────────────────────────────────────────
 EXPORTER_URL   = os.environ.get("IKUAI_EXPORTER_URL", "http://ikuai-exporter:9090")
 PROMETHEUS_URL = os.environ.get("PROMETHEUS_URL",     "http://prometheus:9090")
-PORT           = int(os.environ.get("IKUAI_PORT", "9193"))
+PORT           = int(os.environ.get("IKUAI_PORT", "3000"))
 ASSET_DIR      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dist")
 
 IKUAI_URL      = os.environ.get("IKUAI_URL", "")
