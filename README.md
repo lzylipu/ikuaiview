@@ -323,7 +323,7 @@ echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
 
 ## 致谢
 
-- 前端视觉语言参考了开源项目 [RouterView](https://github.com/unDefFtr/RouterView) 的布局与交互思路
+- 前端视觉与卡片布局参考了开源网络看板类项目的设计思路（独立实现数据对接与信息架构）
 - 实时采集依赖社区镜像 [`jakes/ikuai-exporter`](https://hub.docker.com/)
 - 历史曲线依赖 [Prometheus](https://prometheus.io/)
 

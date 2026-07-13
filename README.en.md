@@ -296,7 +296,7 @@ Public packages can usually be pulled without login.
 
 ## Acknowledgements
 
-- Visual language inspired by [RouterView](https://github.com/unDefFtr/RouterView)
+- Visual language inspired by open-source network dashboard layouts (data contracts and information architecture implemented independently)
 - Live metrics via community image `jakes/ikuai-exporter`
 - History via [Prometheus](https://prometheus.io/)
 
