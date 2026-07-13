@@ -58,7 +58,6 @@ It consolidates live status, WAN/PPPoE details, historical throughput, network s
 ---
 
 ## Quick start
-
 ### 1. Requirements
 
 - Docker Engine
@@ -76,27 +75,11 @@ cd ikuaiview
 ### 3. Prepare config & templates
 
 ```bash
-# 1) environment file (required)
-cp .env.example .env
-# edit with real values
-# nano .env   or   vim .env
+# recommended: create .env / prometheus template / data dir
+sh scripts/bootstrap.sh
 
-# 2) Prometheus config template (shipped; recreate if missing)
-mkdir -p prometheus prometheus-data
-test -f prometheus/prometheus.yml || cat > prometheus/prometheus.yml <<'EOF'
-global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
-
-scrape_configs:
-  - job_name: ikuai
-    static_configs:
-      - targets:
-          - ikuai-exporter:9090
-EOF
-
-# 3) data directory permissions (needed on some NAS / bind mounts)
-chmod -R a+rwX prometheus-data || true
+# then fill real credentials
+# nano .env
 ```
 
 Minimum `.env`:
@@ -107,7 +90,20 @@ IKUAI_USERNAME=readonly-user
 IKUAI_PASSWORD=readonly-password
 ```
 
-### 4. Launch
+### 4. One-shot start (full stack)
+
+By default Compose pulls the published image `ghcr.io/lzylipu/ikuaiview:latest` and starts:
+
+1. `jakes/ikuai-exporter`
+2. `prom/prometheus`
+3. `ikuaiview` (dashboard `:3000`)
+
+```bash
+docker-compose pull
+docker-compose up -d
+```
+
+Local source build for the dashboard image:
 
 ```bash
 docker-compose up -d --build
@@ -133,14 +129,13 @@ Override host ports with `IKUAIVIEW_PORT` / `IKUAI_EXPORTER_PORT` / `PROMETHEUS_
 
 ```bash
 docker-compose ps
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/
+curl -fsS -o /dev/null -w '%{http_code}
+' http://127.0.0.1:3000/
 curl -fsS http://127.0.0.1:9191/metrics | head
 curl -fsS http://127.0.0.1:9090/api/v1/targets | head
 ```
 
-After opening the UI, **wait 10–15 seconds** for the first WebSocket snapshot. Initial `—` / `0` values are loading placeholders.
-
----
+After opening the UI, **wait 10-15 seconds** for the first WebSocket snapshot. Initial placeholders are loading state, not final values.
 
 ## Configuration
 
@@ -277,6 +272,27 @@ cd /path/to/ikuaiview && docker-compose up -d --build ikuaiview
 ```
 
 ---
+
+## Docker image & CI
+The dashboard image is built by GitHub Actions and published to **GHCR**:
+
+```text
+ghcr.io/lzylipu/ikuaiview:latest
+ghcr.io/lzylipu/ikuaiview:sha-<short>
+```
+
+- Workflow: `.github/workflows/docker-publish.yml`
+- Triggers: push to `main`, `v*` tags, manual `workflow_dispatch`
+- Compose default: `IKUAIVIEW_IMAGE=ghcr.io/lzylipu/ikuaiview:latest`
+- Local build remains available: `docker-compose up -d --build`
+
+If the package is private:
+
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+```
+
+Public packages can usually be pulled without login.
 
 ## Acknowledgements
 

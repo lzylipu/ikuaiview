@@ -1,15 +1,18 @@
-# iKuaiView full stack
-# Services:
-#   1) jakes/ikuai-exporter  - scrape iKuai metrics
-#   2) prom/prometheus      - store WAN history
-#   3) ikuaiview            - dashboard + gateway (host port 3000)
+# iKuaiView full stack (one-shot)
 #
-# First-time setup:
-#   cp .env.example .env
-#   # edit .env with your iKuai read-only API credentials
-#   mkdir -p prometheus prometheus-data
-#   # prometheus/prometheus.yml is shipped; create only if missing
-#   docker-compose up -d --build
+# Services:
+#   1) jakes/ikuai-exporter  - live metrics from iKuai
+#   2) prom/prometheus      - WAN history
+#   3) ikuaiview            - dashboard + gateway (host :3000)
+#
+# Quick start:
+#   cp .env.example .env && $EDITOR .env
+#   sh scripts/bootstrap.sh   # optional template helper
+#   docker-compose up -d
+#
+# Image options for ikuaiview:
+#   - default: pull ghcr.io/lzylipu/ikuaiview:latest
+#   - local rebuild: docker-compose up -d --build
 #
 # Access: http://<host>:3000
 
@@ -53,15 +56,18 @@ services:
       - ikuai-monitor
 
   ikuaiview:
-    build: .
-    image: ikuaiview:latest
+    # Published image (GitHub Actions -> GHCR). Override with IKUAIVIEW_IMAGE.
+    image: ${IKUAIVIEW_IMAGE:-ghcr.io/lzylipu/ikuaiview:latest}
+    # Keep build context so `docker-compose up -d --build` still works offline/local.
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: ikuaiview
     restart: unless-stopped
     environment:
       IKUAI_URL: "${IKUAI_URL}"
       IKUAI_USERNAME: "${IKUAI_USERNAME}"
       IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
-      # Prefer Docker DNS service names inside the compose network
       IKUAI_EXPORTER_URL: "${IKUAI_EXPORTER_URL:-http://ikuai-exporter:9090}"
       PROMETHEUS_URL: "${PROMETHEUS_URL:-http://prometheus:9090}"
       IKUAI_PORT: "3000"

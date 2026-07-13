@@ -58,11 +58,10 @@
 ---
 
 ## 快速开始
-
 ### 1. 环境要求
 
 - Docker Engine
-- Docker Compose v1（`docker-compose`）或兼容的 Compose 插件
+- Docker Compose v1 (`docker-compose`) 或兼容的 Compose 插件
 - 可访问的 iKuai Web/API 地址
 - 一个 **iKuai 只读账号**（推荐单独创建 API 用户，不要用超管）
 
@@ -76,27 +75,11 @@ cd ikuaiview
 ### 3. 准备配置与模板
 
 ```bash
-# 1) 环境变量（必做）
-cp .env.example .env
-# 用编辑器填写真实值
-# nano .env   或   vim .env
+# 推荐：一键生成 .env / prometheus 模板 / 数据目录
+sh scripts/bootstrap.sh
 
-# 2) Prometheus 配置模板（仓库已提供；若缺失可重建）
-mkdir -p prometheus prometheus-data
-test -f prometheus/prometheus.yml || cat > prometheus/prometheus.yml <<'EOF'
-global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
-
-scrape_configs:
-  - job_name: ikuai
-    static_configs:
-      - targets:
-          - ikuai-exporter:9090
-EOF
-
-# 3) 数据目录权限（部分 NAS / bind mount 环境需要）
-chmod -R a+rwX prometheus-data || true
+# 然后编辑真实凭据
+# nano .env
 ```
 
 `.env` 最少需要：
@@ -107,13 +90,26 @@ IKUAI_USERNAME=只读账号
 IKUAI_PASSWORD=只读密码
 ```
 
-### 4. 一键启动
+### 4. 一键启动（完整三件套）
+
+默认会拉取已发布镜像 `ghcr.io/lzylipu/ikuaiview:latest`，并启动：
+
+1. `jakes/ikuai-exporter`
+2. `prom/prometheus`
+3. `ikuaiview`（看板 `:3000`）
+
+```bash
+docker-compose pull
+docker-compose up -d
+```
+
+如果要本地源码构建看板镜像：
 
 ```bash
 docker-compose up -d --build
 ```
 
-启动后访问：
+访问：
 
 ```text
 http://<主机IP>:3000
@@ -132,22 +128,14 @@ http://<主机IP>:3000
 ### 5. 验证
 
 ```bash
-# 容器状态
 docker-compose ps
-
-# 看板
-curl -fsS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/
-
-# exporter metrics
+curl -fsS -o /dev/null -w '%{http_code}
+' http://127.0.0.1:3000/
 curl -fsS http://127.0.0.1:9191/metrics | head
-
-# Prometheus targets（应看到 ikuai-exporter UP）
 curl -fsS http://127.0.0.1:9090/api/v1/targets | head
 ```
 
 浏览器打开看板后，**等待 10–15 秒** 让 WebSocket 首包到达；初始的 `—` / `0` 属于加载态，不是最终结果。
-
----
 
 ## 配置说明
 
@@ -311,6 +299,27 @@ docker-compose up -d --build ikuaiview
 ```
 
 ---
+
+## Docker 镜像与 CI
+看板镜像由 GitHub Actions 自动构建并推送到 **GHCR**：
+
+```text
+ghcr.io/lzylipu/ikuaiview:latest
+ghcr.io/lzylipu/ikuaiview:sha-<short>
+```
+
+- 工作流：`.github/workflows/docker-publish.yml`
+- 触发：`main` 推送、`v*` 标签、手动 `workflow_dispatch`
+- Compose 默认使用 `IKUAIVIEW_IMAGE=ghcr.io/lzylipu/ikuaiview:latest`
+- 也可本地构建：`docker-compose up -d --build`
+
+若私有包拉取需要登录：
+
+```bash
+echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
+```
+
+公开仓库镜像通常可直接 `docker pull`（若仓库包可见性为 public）。
 
 ## 致谢
 
