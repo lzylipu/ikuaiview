@@ -1,79 +1,83 @@
-# iKuaiView full stack (one-shot)
+# iKuaiView 完整三件套（官方部署模板）
 #
-# Services:
-#   1) jakes/ikuai-exporter  - live metrics from iKuai
-#   2) prom/prometheus      - WAN history
-#   3) ikuaiview            - dashboard + gateway (host :3000)
+# 目录结构（通用，可改到任意路径）：
+#   ./
+#   ├── docker-compose.yml
+#   ├── .env
+#   ├── prometheus/
+#   │   └── prometheus.yml
+#   └── prometheus-data/
 #
-# Quick start:
-#   cp .env.example .env && $EDITOR .env
-#   sh scripts/bootstrap.sh
-#   docker-compose pull
-#   docker-compose up -d
+# 首次：
+#   cp .env.example .env   # 填写 iKuai 只读账号
+#   mkdir -p prometheus prometheus-data
+#   # 确保 prometheus/prometheus.yml 存在（仓库已提供模板）
+#   docker-compose pull && docker-compose up -d
 #
-# Image options for ikuaiview:
-#   - default: pull lzylipu/ikuaiview:latest (Docker Hub)
-#   - fallback/alt: ghcr.io/lzylipu/ikuaiview:latest
-#   - local rebuild: docker-compose up -d --build
-#
-# Access: http://<host>:3000
+# 访问：
+#   看板       http://<主机IP>:3000
+#   exporter   http://<主机IP>:9191/metrics
+#   Prometheus http://<主机IP>:9192
 
 version: "3.8"
 
 services:
+  # ===== 1. ikuai-exporter: 采集器 =====
   ikuai-exporter:
     image: jakes/ikuai-exporter:latest
     container_name: ikuai-exporter
-    restart: unless-stopped
+    restart: always
     environment:
       IKUAI_URL: "${IKUAI_URL}"
       IKUAI_USERNAME: "${IKUAI_USERNAME}"
       IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
-      IKUAI_MODULES: "${IKUAI_MODULES:-sysStat,lanDevice,interfaceInfo}"
-      IKUAI_INSECURE_SKIP: "${IKUAI_INSECURE_SKIP:-true}"
-      IKUAI_LEVEL: "${IKUAI_LEVEL:-info}"
+      IKUAI_MODULES: "sysStat,lanDevice,interfaceInfo"
+      IKUAI_INSECURE_SKIP: "true"
+      IKUAI_LEVEL: "info"
     ports:
-      - "${IKUAI_EXPORTER_PORT:-9191}:9090"
+      - "9191:9090"
     networks:
       - ikuai-monitor
 
+  # ===== 2. Prometheus: 时序数据库 =====
   prometheus:
     image: prom/prometheus:latest
     container_name: ikuai-prometheus
-    restart: unless-stopped
-    user: "root"
+    restart: always
+    user: "root"   # 避免挂载目录无写权限导致 panic
     volumes:
+      # 通用相对路径；NAS/群晖可改成你自己的绝对路径
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus-data:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}"
+      - "--storage.tsdb.retention.time=30d"
       - "--web.enable-lifecycle"
     ports:
-      - "${PROMETHEUS_PORT:-9090}:9090"
+      - "9192:9090"
     depends_on:
       - ikuai-exporter
     networks:
       - ikuai-monitor
 
+  # ===== 3. ikuaiview: 看板（替代 Grafana）=====
   ikuaiview:
-    # Docker Hub by default (also published to GHCR)
+    # Docker Hub 默认；也可改用 ghcr.io/lzylipu/ikuaiview:latest
     image: ${IKUAIVIEW_IMAGE:-lzylipu/ikuaiview:latest}
-    build:
-      context: .
-      dockerfile: Dockerfile
     container_name: ikuaiview
-    restart: unless-stopped
+    restart: always
     environment:
       IKUAI_URL: "${IKUAI_URL}"
       IKUAI_USERNAME: "${IKUAI_USERNAME}"
       IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
-      IKUAI_EXPORTER_URL: "${IKUAI_EXPORTER_URL:-http://ikuai-exporter:9090}"
-      PROMETHEUS_URL: "${PROMETHEUS_URL:-http://prometheus:9090}"
+      # 容器内互访必须用服务名，不要写宿主机 IP
+      IKUAI_EXPORTER_URL: "http://ikuai-exporter:9090"
+      PROMETHEUS_URL: "http://prometheus:9090"
       IKUAI_PORT: "3000"
     ports:
-      - "${IKUAIVIEW_PORT:-3000}:3000"
+      # 默认 3000；若要沿用 91xx 习惯可改为 "9193:3000"
+      - "3000:3000"
     depends_on:
       - ikuai-exporter
       - prometheus

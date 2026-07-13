@@ -6,15 +6,13 @@
 
 <p align="center">
   <strong>Read-only LAN dashboard for iKuai routers</strong><br>
-  <code>ikuai-exporter + Prometheus + Web UI → one-shot Docker Compose</code>
+  <code>Official 3-service Compose template: exporter + Prometheus + board</code>
 </p>
 
-> 📖 **Full bilingual documentation lives in [README.md](./README.md)**  
-> Jump to English section: [English](./README.md#-english)
+> 📖 Full bilingual docs: **[README.md](./README.md)**  
+> English jump: [English](./README.md#-english)
 
----
-
-## 🚀 One-shot deploy
+## 🚀 One-shot
 
 ```bash
 git clone https://github.com/lzylipu/ikuaiview.git
@@ -28,19 +26,33 @@ docker-compose up -d
 
 ## 📦 Image
 
-- Docker Hub: `lzylipu/ikuaiview:latest`
-- GHCR: `ghcr.io/lzylipu/ikuaiview:latest`
-
-
 ```text
 lzylipu/ikuaiview:latest
+# or ghcr.io/lzylipu/ikuaiview:latest
 ```
+
+## 📁 Generic layout
+
+```text
+./docker-compose.yml
+./.env
+./prometheus/prometheus.yml
+./prometheus-data/
+```
+
+## 🔌 Ports
+
+| Service | Host |
+|:--------|:-----|
+| Board | 3000 |
+| Exporter | 9191 |
+| Prometheus | 9192 |
 
 ## 🔐 Notes
 
 - Read-only iKuai account only
 - Never commit real `.env`
-- Board default port **3000**
+- Use relative paths in compose (no personal NAS secrets)
 
 ## 📄 License
 

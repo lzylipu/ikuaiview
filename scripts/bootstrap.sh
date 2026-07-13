@@ -6,7 +6,7 @@ cd "$ROOT"
 
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "✅ Created .env from .env.example — edit IKUAI_URL / USERNAME / PASSWORD before start."
+  echo "✅ Created .env from .env.example — edit IKUAI_URL / USERNAME / PASSWORD"
 else
   echo "ℹ️  .env already exists"
 fi
@@ -33,9 +33,9 @@ fi
 chmod -R a+rwX prometheus-data 2>/dev/null || true
 echo
 echo "Next:"
-echo "  1) edit .env   (IKUAI_URL / IKUAI_USERNAME / IKUAI_PASSWORD)"
+echo "  1) edit .env"
 echo "  2) docker-compose pull"
 echo "  3) docker-compose up -d"
 echo "  4) open http://<host>:3000"
 echo
-echo "Local build alternative: docker-compose up -d --build"
+echo "Ports: board=3000  exporter=9191  prometheus=9192"

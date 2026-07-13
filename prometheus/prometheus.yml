@@ -1,6 +1,6 @@
-# Prometheus scrape config for iKuaiView
-# Target uses the Docker Compose service name + container port.
-# Do NOT point this at a host-mapped IP unless you know what you are doing.
+# Prometheus 抓取配置（首次部署模板）
+# 目标使用 Compose 服务名 + 容器端口 9090
+# 不要写成宿主机映射端口（如 9191）
 
 global:
   scrape_interval: 15s
