@@ -60,7 +60,7 @@
 |:-----|:------------|:-----|
 | ① 采集器 | `jakes/ikuai-exporter` | 系统、接口、终端实时指标 |
 | ② 时序库 | `prom/prometheus` | WAN 上下行历史曲线 |
-| ③ 看板 | `ghcr.io/lzylipu/ikuaiview` | Python 网关 + Vue 静态面板 |
+| ③ 看板 | `lzylipu/ikuaiview` | Python 网关 + Vue 静态面板 |
 
 > 💡 延迟探针 = 看板容器发出的 **TCP connect RTT**（不是 ICMP Ping）。  
 > 若使用 Fake-IP / 代理，部分站点极低延迟仅代表本地代理入口。
@@ -69,9 +69,15 @@
 
 ## 📦 镜像与端口
 
+| 仓库 | 镜像 |
+|:-----|:-----|
+| **Docker Hub（默认）** | `lzylipu/ikuaiview:latest` |
+| GHCR（同步） | `ghcr.io/lzylipu/ikuaiview:latest` |
+
+
 | 项目 | 默认值 |
 |:-----|:-------|
-| 看板镜像 | `ghcr.io/lzylipu/ikuaiview:latest` |
+| 看板镜像 | `lzylipu/ikuaiview:latest` |
 | 看板端口 | **3000** |
 | exporter 主机端口 | 9191 → 容器 9090 |
 | Prometheus 主机端口 | 9090 → 容器 9090 |
@@ -163,7 +169,7 @@ curl -fsS http://127.0.0.1:3000/api/health
 | `IKUAI_MODULES` | ❌ | `sysStat,lanDevice,interfaceInfo` | exporter 采集模块 |
 | `IKUAI_INSECURE_SKIP` | ❌ | `true` | 跳过 TLS 校验（内网常见） |
 | `IKUAI_LEVEL` | ❌ | `info` | exporter 日志级别 |
-| `IKUAIVIEW_IMAGE` | ❌ | `ghcr.io/lzylipu/ikuaiview:latest` | 看板镜像 |
+| `IKUAIVIEW_IMAGE` | ❌ | `lzylipu/ikuaiview:latest` | 看板镜像（Docker Hub；也可 `ghcr.io/lzylipu/ikuaiview:latest`） |
 | `IKUAIVIEW_PORT` | ❌ | `3000` | 看板主机端口 |
 | `IKUAI_EXPORTER_PORT` | ❌ | `9191` | exporter 主机端口 |
 | `PROMETHEUS_PORT` | ❌ | `9090` | Prometheus 主机端口 |
@@ -245,7 +251,7 @@ docker-compose down
 
 ```bash
 echo $GITHUB_TOKEN | docker login ghcr.io -u <GitHub用户名> --password-stdin
-docker pull ghcr.io/lzylipu/ikuaiview:latest
+docker pull lzylipu/ikuaiview:latest
 ```
 
 ---
@@ -402,7 +408,7 @@ docker-compose up -d --build
 | `IKUAI_URL` | yes | — | iKuai base URL |
 | `IKUAI_USERNAME` | yes | — | read-only user |
 | `IKUAI_PASSWORD` | yes | — | read-only password |
-| `IKUAIVIEW_IMAGE` | no | `ghcr.io/lzylipu/ikuaiview:latest` | board image |
+| `IKUAIVIEW_IMAGE` | no | `lzylipu/ikuaiview:latest` | board image |
 | `IKUAIVIEW_PORT` | no | `3000` | host port for UI |
 | `IKUAI_EXPORTER_URL` | no | `http://ikuai-exporter:9090` | exporter URL inside compose |
 | `PROMETHEUS_URL` | no | `http://prometheus:9090` | Prometheus URL inside compose |

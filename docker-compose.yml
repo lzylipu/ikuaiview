@@ -7,11 +7,13 @@
 #
 # Quick start:
 #   cp .env.example .env && $EDITOR .env
-#   sh scripts/bootstrap.sh   # optional template helper
+#   sh scripts/bootstrap.sh
+#   docker-compose pull
 #   docker-compose up -d
 #
 # Image options for ikuaiview:
-#   - default: pull ghcr.io/lzylipu/ikuaiview:latest
+#   - default: pull lzylipu/ikuaiview:latest (Docker Hub)
+#   - fallback/alt: ghcr.io/lzylipu/ikuaiview:latest
 #   - local rebuild: docker-compose up -d --build
 #
 # Access: http://<host>:3000
@@ -56,9 +58,8 @@ services:
       - ikuai-monitor
 
   ikuaiview:
-    # Published image (GitHub Actions -> GHCR). Override with IKUAIVIEW_IMAGE.
-    image: ${IKUAIVIEW_IMAGE:-ghcr.io/lzylipu/ikuaiview:latest}
-    # Keep build context so `docker-compose up -d --build` still works offline/local.
+    # Docker Hub by default (also published to GHCR)
+    image: ${IKUAIVIEW_IMAGE:-lzylipu/ikuaiview:latest}
     build:
       context: .
       dockerfile: Dockerfile

@@ -28,8 +28,12 @@ docker-compose up -d
 
 ## 📦 Image
 
+- Docker Hub: `lzylipu/ikuaiview:latest`
+- GHCR: `ghcr.io/lzylipu/ikuaiview:latest`
+
+
 ```text
-ghcr.io/lzylipu/ikuaiview:latest
+lzylipu/ikuaiview:latest
 ```
 
 ## 🔐 Notes
