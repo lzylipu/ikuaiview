@@ -1,50 +1,95 @@
-# iKuaiView 看板 (容器3)
+# iKuaiView
 
-RouterView 是一个为 **iKuai 爱快流控路由器** 深度定制的极轻量、响应式、实时网络监控面板。
+一个只读、局域网优先的 iKuai 网络监控看板。项目复用 RouterView 的视觉语言，但数据直接来自现有的 `ikuai-exporter`、Prometheus 和 iKuai 只读 API。
 
-## 🌟 核心特性
-- **深色主题设计**：像素级复刻 RouterView (MikroTik ROS) 面板的深色视觉风格（毛玻璃特效卡片，配色优雅）。
-- **实时数据流 (SSE)**：基于 HTML5 Server-Sent Events 实现毫秒级无感速率更新，在 SSE 异常时自动降级为高频异步短轮询，极度稳健。
-- **历史吞吐曲线**：前端深度联通 **Prometheus**，提供 “实时”、“15分钟”、“1小时”、“24小时” 上下行吞吐趋势及系统负荷（CPU/内存）曲线的无缝切换。
-- **活跃终端排行榜**：提取 iKuai 各终端的上下行速率与连接数，支持针对 IP、MAC、下载速度、上传速度、连接数的多列双向排序。
-- **免去维护烦恼**：极轻量。采用 Python 标准库构建网关后台，无任何厚重依赖，内置精简反代，无需处理跨域 (CORS) 与凭证泄露。
+## 架构
 
----
+```text
+iKuai router (read-only API)
+         │
+         ├── ikuai-exporter ──实时指标──┐
+         └── Prometheus ──历史 WAN 曲线─┼── iKuaiView gateway :9193
+                                        └── Vue dashboard / WebSocket
+```
 
-## 🏗️ 架构组成
-本项目作为**容器3**，旨在与局域网内现有的监控生态融合：
-1. **容器1 (`ikuai-exporter`)**：提供 iKuai 的 metrics 采集（如 10.10.0.2:9191）。
-2. **容器2 (`Prometheus`)**：提供时序数据存储（如 10.10.0.2:9192）。
-3. **容器3 (`RouterView-iKuai`)** [本项目]：
-   - 抓取容器1 的实时指标，提炼为精简 JSON 供前端渲染。
-   - 代理并过滤容器2 的时序范围 API，为 ECharts 提供历史数据。
-   - 提供自包含的精美单文件网页，暴露在 `9193` 端口直接访问。
+- **ikuai-exporter**：实时 CPU、内存、WAN 速率、在线终端、各终端累计流量和连接数。
+- **Prometheus**：WAN 近 1 小时 / 24 小时上下行历史曲线。
+- **iKuai API**：PPPoE 信息、WAN DNS、DHCP、端口映射、原生接口累计流量和静态 DHCP 备注。
+- **iKuaiView**：Python 标准库网关与 Vue 静态面板；没有登录、没有写路由器配置的能力。
 
----
+## 面板内容
 
-## 🚀 部署指南 (Portainer / Docker Compose)
+- 两列四区桌面布局：系统/WAN、网络服务与延迟、上下行速率、在线终端设备。
+- PPPoE 公网 IP、网关、WAN DNS、线路状态、拨号时长和连接时间。
+- DHCP 范围与可用地址、DNAT 端口转发和四个 TCP connect 延迟探针。
+- 可排序的在线终端表：名称、IP、MAC、实时上下行、累计上下行、连接数。
+- 暗色 / 亮色 / 跟随系统三态主题；品牌图标同时用于顶栏与 favicon。
 
-### 1. 独立拉起或构建镜像
-你可以直接在项目目录下通过 Compose 一键构建并启动整个监控栈：
+> 延迟探针为 gateway 容器发出的 TCP connect RTT，不是 ICMP Ping。使用 Fake-IP/OpenClash 时，部分站点的低延迟仅代表本地代理入口。
+
+## 快速部署
+
+### 前置条件
+
+- Docker Compose v1（`docker-compose`）
+- 可访问的 iKuai Web API
+- 推荐同一 Compose 网络内运行 `ikuai-exporter` 与 Prometheus；本 Compose 已使用服务名互连。
+
+### 1. 配置环境变量
+
+```bash
+cp .env.example .env
+# 编辑 .env，填入你的 iKuai URL、只读账号和密码
+```
+
+`.env` 已被 Git 忽略，切勿提交真实凭据。
+
+### 2. 启动
 
 ```bash
 docker-compose up -d --build
 ```
 
-### 2. 容器3 (`ikuaiview`) 关键变量说明
-如果你已在群晖或 PVE 的 Portainer 中运行了容器1与容器2，只需新建此容器，并传入以下环境变量：
+打开 `http://<host>:9193`。
 
-| 环境变量 | 默认值 | 作用 |
-| :--- | :--- | :--- |
-| `IKUAI_EXPORTER_URL` | `http://10.10.0.2:9191` | 指向现有的 ikuai-exporter 地址 |
-| `PROMETHEUS_URL` | `http://10.10.0.2:9192` | 指向现有的 Prometheus 时序库地址 |
-| `IKUAI_PORT` | `9193` | 面板监听和映射的端口 |
+## 环境变量
 
----
+| 变量 | 必填 | 说明 |
+| --- | --- | --- |
+| `IKUAI_URL` | 是 | iKuai Web API 根地址，例如 `http://router.lan` |
+| `IKUAI_USERNAME` | 是 | iKuai 只读 API 用户名 |
+| `IKUAI_PASSWORD` | 是 | iKuai API 密码，仅写入本地 `.env` |
+| `IKUAI_EXPORTER_URL` | 否 | exporter 地址；Compose 默认 `http://ikuai-exporter:9090` |
+| `PROMETHEUS_URL` | 否 | Prometheus 地址；Compose 默认 `http://prometheus:9090` |
+| `IKUAI_PORT` | 否 | 网关监听端口，默认 `9193` |
 
-## 🎨 视觉预览与交互
-网页采用两栏响应式布局：
-- **左侧**：实时展示当前主机的 CPU、内存占用百分比（带状态颜色指示：<50% 绿色，50%~85% 橙色，>85% 红色），LAN 网关与 WAN 拨号地址，以及在线设备总数与路由器 Uptime。
-- **右侧**：
-  - **ECharts 折线图**：支持直接通过顶栏按钮切换查看长周期（15m / 1h / 24h）的历史流量吞吐波动。
-  - **终端监控表**：提供实时流量的动态网速列表，点击“终端名称/MAC”、“IP地址”、“当前下载/上传”、“并发连接”的表头即可进行升降序快速重排，帮助你迅速锁定内网里的 P2P / 流量大户。
+## 数据准确性
+
+- 实时设备速率、累计字节与连接数直接来自 exporter，不依赖 Prometheus。
+- 1 小时 / 24 小时 WAN 图表来自 Prometheus；若不需要历史曲线，可以按需删去 Prometheus 相关服务和 UI 范围。
+- 设备名称优先以 iKuai DHCP 静态分配中的 IP→备注为准；MAC 优先级为 DHCP 静态分配、ARP、最后才是 exporter。
+- “本月用量”读取 iKuai 原生接口监控数据；不以 Prometheus 不完整留存或绝对计数冒充。
+
+## 开发与验证
+
+前端源码不在运行容器内维护。构建产物为 `dist/`；更新前端后应执行：
+
+```bash
+pnpm typecheck
+pnpm build
+pnpm bundle:check
+rm -rf /root/ikuaiview/dist && cp -a dist/. /root/ikuaiview/dist/
+docker-compose up -d --build ikuaiview
+```
+
+提交前至少验证：类型检查、生产构建、bundle 预算、`http://localhost:9193` HTTP 200，以及浏览器等待 WebSocket 首包后的实际渲染。
+
+## 安全边界
+
+- 面板设计为**只读局域网看板**；请通过防火墙、反向代理或 VPN 控制访问范围。
+- 不要将 `.env`、真实内网资产信息、路由器密码或 session cookie 提交到 GitHub。
+- 网关使用 iKuai API 查询状态和配置摘要，不会调用写操作。
+
+## License
+
+本项目包含基于 RouterView 视觉布局改造的前端成果。发布和再分发前，请分别检查上游项目及所用依赖的许可条款。

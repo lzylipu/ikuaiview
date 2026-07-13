@@ -7,9 +7,9 @@ services:
     container_name: ikuai-exporter
     restart: always
     environment:
-      IKUAI_URL: "http://10.10.0.1"
-      IKUAI_USERNAME: "api"
-      IKUAI_PASSWORD: "zz123123"
+      IKUAI_URL: "${IKUAI_URL}"
+      IKUAI_USERNAME: "${IKUAI_USERNAME}"
+      IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
       IKUAI_MODULES: "sysStat,lanDevice,interfaceInfo"
       IKUAI_INSECURE_SKIP: "true"
       IKUAI_LEVEL: "info"
@@ -25,8 +25,8 @@ services:
     restart: always
     user: "root"
     volumes:
-      - /volume6/docker/ikuai/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - /volume6/docker/ikuai/prometheus-data:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -36,43 +36,23 @@ services:
     networks:
       - ikuai-monitor
 
-  # ===== 3. Grafana: 看板 (可选，若不使用可注释/删掉) =====
-  grafana:
-    image: grafana/grafana:latest
-    container_name: ikuai-grafana
-    restart: always
-    user: "0"
-    environment:
-      GF_SECURITY_ADMIN_USER: "admin"
-      GF_SECURITY_ADMIN_PASSWORD: "admin"
-      GF_USERS_ALLOW_SIGN_UP: "false"
-      GF_AUTH_ANONYMOUS_ENABLED: "false"
-    volumes:
-      - /volume6/docker/ikuai/grafana-provisioning:/etc/grafana/provisioning:ro
-      - /volume6/docker/ikuai/grafana-dashboards:/var/lib/grafana/dashboards:ro
-      - /volume6/docker/ikuai/grafana-data:/var/lib/grafana
-    ports:
-      - "9190:3000"
-    depends_on:
-      - prometheus
-    networks:
-      - ikuai-monitor
-
-  # ===== 4. ikuaiview: 容器3 (借用视觉样式的轻量级爱快网络看板) =====
+  # ===== 3. ikuaiview: 看板 =====
   ikuaiview:
     build: .
     container_name: ikuaiview
     restart: always
     environment:
-      # 对接局域网内的容器 1 和 容器 2 接口
-      IKUAI_EXPORTER_URL: "http://10.10.0.2:9191"
-      PROMETHEUS_URL: "http://10.10.0.2:9192"
-      IKUAI_URL: "http://10.10.0.1"
-      IKUAI_USERNAME: "api"
-      IKUAI_PASSWORD: "zz123123"
+      IKUAI_EXPORTER_URL: "http://ikuai-exporter:9090"
+      PROMETHEUS_URL: "http://prometheus:9090"
+      IKUAI_URL: "${IKUAI_URL}"
+      IKUAI_USERNAME: "${IKUAI_USERNAME}"
+      IKUAI_PASSWORD: "${IKUAI_PASSWORD}"
       PORT: "9193"
     ports:
       - "9193:9193"
+    depends_on:
+      - ikuai-exporter
+      - prometheus
     networks:
       - ikuai-monitor
 
