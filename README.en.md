@@ -1,5 +1,11 @@
 # iKuaiView
 
+<p align="center">
+  <img src="dist/ikuaiview-logo.png" alt="iKuaiView logo" width="128" height="128" />
+</p>
+
+<p align="center"><b>Read-only LAN dashboard for iKuai routers</b></p>
+
 English | [简体中文](./README.md)
 
 **iKuaiView** is a **read-only LAN dashboard** for [iKuai](https://www.ikuai8.com/) routers.  

@@ -1,5 +1,11 @@
 # iKuaiView
 
+<p align="center">
+  <img src="dist/ikuaiview-logo.png" alt="iKuaiView logo" width="128" height="128" />
+</p>
+
+<p align="center"><b>iKuai 只读局域网监控看板</b></p>
+
 [English](./README.en.md) | 简体中文
 
 **iKuaiView** 是一个面向 [iKuai](https://www.ikuai8.com/) 路由器的**只读局域网监控看板**。  
