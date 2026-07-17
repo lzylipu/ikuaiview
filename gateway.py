@@ -54,6 +54,11 @@ PROBE_TARGETS = [
 probe_cache = {"items": [], "ts": 0}
 
 monthly_usage_cache = {"gb": 0.0, "covered_seconds": 0, "ts": 0}
+# homepage 接口较重（~1s+/次），本月用量无需秒级刷新
+homepage_usage_cache = {"total_bytes": 0, "isp": "", "ip": "", "ts": 0}
+HOMEPAGE_USAGE_TTL = int(os.environ.get("IKUAIVIEW_HOMEPAGE_TTL", "300"))  # 默认 5 分钟
+METADATA_POLL_SECONDS = int(os.environ.get("IKUAIVIEW_METADATA_POLL_SECONDS", "30"))
+
 
 # ── 时区：爱快 pppoe_updatetime 是 Unix 时戳（UTC 秒），但拨号时间应按北京时间显示。
 #    容器层 TZ=Asia/Shanghai 是首选；代码层兜底，避免再被 UTC 容器带回 8h 误差。
@@ -612,38 +617,53 @@ def _fetch_ikuai_metadata_locked():
         print("[Poller] iKuai monthly accounting failed:", e)
 
     # 系统概览主页 WAN 本月用量（与 Web UI「本月数据使用情况」同源）
-    try:
-        home = _call("homepage", {"TYPE": "all"})
-        # _call returns results.data or results object depending on shape
-        if isinstance(home, dict) and "wan_stat" not in home:
-            # maybe still wrapped
-            home = home.get("results") or home
-        wan_stat = {}
-        if isinstance(home, dict):
-            wan_stat = home.get("wan_stat") or {}
-            if not wan_stat:
-                wans = home.get("wans_stat") or []
-                if isinstance(wans, list) and wans:
-                    wan_stat = wans[0]
-        if isinstance(wan_stat, dict) and wan_stat:
-            total = int(float(wan_stat.get("total") or 0))
-            extra["homepage_wan_month_total_bytes"] = max(0, total)
-            extra["homepage_wan_isp"] = str(wan_stat.get("isp") or "")
-            extra["homepage_wan_ip"] = str(wan_stat.get("ip_addr") or "")
-            # 若拨号时间缺失，用 homepage 的 updatetime 兜底
-            if not extra.get("wan_dial_time_ts"):
-                up = wan_stat.get("updatetime") or 0
-                try:
-                    up_ts = int(float(up))
-                    if up_ts > 0:
-                        extra["wan_dial_duration_seconds"] = max(0, int(time.time()) - up_ts)
-                        extra["wan_dial_time_str"] = _fmt_cn_time(up_ts)
-                        extra["wan_dial_time_ts"] = up_ts
-                except Exception:
-                    pass
-            print(f"[Poller] homepage wan_stat total_bytes={extra['homepage_wan_month_total_bytes']} isp={extra['homepage_wan_isp']}")
-    except Exception as e:
-        print("[Poller] homepage wan_stat failed:", e)
+    # homepage 接口重（实测约 1s+ / 170KB），默认 5 分钟拉一次，避免抬高爱快 CPU
+    now_ts = time.time()
+    if homepage_usage_cache["ts"] and now_ts - homepage_usage_cache["ts"] < HOMEPAGE_USAGE_TTL:
+        extra["homepage_wan_month_total_bytes"] = int(homepage_usage_cache.get("total_bytes") or 0)
+        extra["homepage_wan_isp"] = homepage_usage_cache.get("isp") or ""
+        extra["homepage_wan_ip"] = homepage_usage_cache.get("ip") or ""
+    else:
+        try:
+            home = _call("homepage", {"TYPE": "all"})
+            if isinstance(home, dict) and "wan_stat" not in home:
+                home = home.get("results") or home
+            wan_stat = {}
+            if isinstance(home, dict):
+                wan_stat = home.get("wan_stat") or {}
+                if not wan_stat:
+                    wans = home.get("wans_stat") or []
+                    if isinstance(wans, list) and wans:
+                        wan_stat = wans[0]
+            if isinstance(wan_stat, dict) and wan_stat:
+                total = int(float(wan_stat.get("total") or 0))
+                extra["homepage_wan_month_total_bytes"] = max(0, total)
+                extra["homepage_wan_isp"] = str(wan_stat.get("isp") or "")
+                extra["homepage_wan_ip"] = str(wan_stat.get("ip_addr") or "")
+                homepage_usage_cache.update({
+                    "total_bytes": extra["homepage_wan_month_total_bytes"],
+                    "isp": extra["homepage_wan_isp"],
+                    "ip": extra["homepage_wan_ip"],
+                    "ts": now_ts,
+                })
+                # 若拨号时间缺失，用 homepage 的 updatetime 兜底
+                if not extra.get("wan_dial_time_ts"):
+                    up = wan_stat.get("updatetime") or 0
+                    try:
+                        up_ts = int(float(up))
+                        if up_ts > 0:
+                            extra["wan_dial_duration_seconds"] = max(0, int(time.time()) - up_ts)
+                            extra["wan_dial_time_str"] = _fmt_cn_time(up_ts)
+                            extra["wan_dial_time_ts"] = up_ts
+                    except Exception:
+                        pass
+                print(f"[Poller] homepage wan_stat total_bytes={extra['homepage_wan_month_total_bytes']} isp={extra['homepage_wan_isp']}")
+        except Exception as e:
+            print("[Poller] homepage wan_stat failed:", e)
+            # 失败时沿用旧缓存
+            extra["homepage_wan_month_total_bytes"] = int(homepage_usage_cache.get("total_bytes") or 0)
+            extra["homepage_wan_isp"] = homepage_usage_cache.get("isp") or ""
+            extra["homepage_wan_ip"] = homepage_usage_cache.get("ip") or ""
 
     with extra_cache_lock:
         global ikuai_extra_cache
@@ -657,7 +677,7 @@ def ikuai_metadata_poller():
             fetch_ikuai_metadata()
         except Exception as e:
             print("[Poller] Error in poller cycle:", e)
-        time.sleep(20.0)
+        time.sleep(max(15, METADATA_POLL_SECONDS))
 
 # 启动 poller 线程
 poller_thread = threading.Thread(target=ikuai_metadata_poller, daemon=True)

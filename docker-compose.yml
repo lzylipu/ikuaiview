@@ -80,6 +80,10 @@ services:
       TZ: "Asia/Shanghai"
       # SQLite 持久化路径（默认 /data，挂载到宿主 ./data，跨爱快重启不丢本月用量与终端累计）
       IKUAIVIEW_DATA_DIR: "/data"
+      # 本月用量来自 homepage（较重），默认 300s 刷新一次
+      IKUAIVIEW_HOMEPAGE_TTL: "${IKUAIVIEW_HOMEPAGE_TTL:-300}"
+      # 元数据轮询间隔（秒），默认 30
+      IKUAIVIEW_METADATA_POLL_SECONDS: "${IKUAIVIEW_METADATA_POLL_SECONDS:-30}"
     volumes:
       # 看板持久化（本月用量、终端字节累计、爱快重启基线）
       - ./data:/data
