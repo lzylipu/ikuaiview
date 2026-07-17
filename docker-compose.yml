@@ -6,11 +6,12 @@
 #   ├── .env
 #   ├── prometheus/
 #   │   └── prometheus.yml
-#   └── prometheus-data/
+#   ├── prometheus-data/
+#   └── data/                    # 看板持久化（本月用量 & 终端累计）
 #
 # 首次：
 #   cp .env.example .env   # 填写 iKuai 只读账号
-#   mkdir -p prometheus prometheus-data
+#   mkdir -p prometheus prometheus-data data
 #   # 确保 prometheus/prometheus.yml 存在（仓库已提供模板）
 #   docker-compose pull && docker-compose up -d
 #
@@ -75,6 +76,13 @@ services:
       IKUAI_EXPORTER_URL: "http://ikuai-exporter:9090"
       PROMETHEUS_URL: "http://prometheus:9090"
       IKUAI_PORT: "3000"
+      # 北京时间显示（爱快 pppoe_updatetime 是 Unix 时戳，避免 UTC 容器导致连接时间差 8h）
+      TZ: "Asia/Shanghai"
+      # SQLite 持久化路径（默认 /data，挂载到宿主 ./data，跨爱快重启不丢本月用量与终端累计）
+      IKUAIVIEW_DATA_DIR: "/data"
+    volumes:
+      # 看板持久化（本月用量、终端字节累计、爱快重启基线）
+      - ./data:/data
     ports:
       # 默认 3000；若要沿用 91xx 习惯可改为 "9193:3000"
       - "3000:3000"

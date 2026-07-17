@@ -7,9 +7,11 @@ import json
 import socket
 import hashlib
 import base64
+import sqlite3
 import threading
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 # ── 配置 ─────────────────────────────────────────────────────────────
@@ -35,6 +37,10 @@ ikuai_extra_cache = {}
 extra_cache_lock = threading.Lock()
 cache_lock = threading.Lock()
 metadata_fetch_lock = threading.Lock()
+# 复用登录会话，避免每 10s 重新 /Action/login 打满爱快 CPU
+ikuai_session = {"sess_key": None, "ts": 0}
+session_lock = threading.Lock()
+SESSION_TTL = 600  # 秒
 
 
 # 探针目标：配置后自动探测，无需 AI 干预
@@ -46,7 +52,103 @@ PROBE_TARGETS = [
 ]
 
 probe_cache = {"items": [], "ts": 0}
+
 monthly_usage_cache = {"gb": 0.0, "covered_seconds": 0, "ts": 0}
+
+# ── 时区：爱快 pppoe_updatetime 是 Unix 时戳（UTC 秒），但拨号时间应按北京时间显示。
+#    容器层 TZ=Asia/Shanghai 是首选；代码层兜底，避免再被 UTC 容器带回 8h 误差。
+CN_TZ = timezone(timedelta(hours=8))
+
+def _fmt_cn_time(ts):
+    """返回北京时间字符串，不依赖容器 TZ。"""
+    try:
+        return datetime.fromtimestamp(int(ts), CN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return "—"
+
+def _cn_ym(ts):
+    """返回 (年, 月) 用于本月累加判定（按北京时间）。"""
+    try:
+        dt = datetime.fromtimestamp(int(ts), CN_TZ)
+        return dt.year, dt.month
+    except Exception:
+        return (0, 0)
+
+def _month_start_ts_cn(now_ts=None):
+    """本月 1 日 00:00（北京时间）对应的 Unix 时戳。"""
+    if now_ts is None:
+        now_ts = int(time.time())
+    dt = datetime.fromtimestamp(now_ts, CN_TZ)
+    month_start = datetime(dt.year, dt.month, 1, tzinfo=CN_TZ)
+    return int(month_start.timestamp())
+
+# ── 持久化 SQLite：跨爱快重启累计本月用量与每台终端字节数 ─────────
+# 路径：容器内 /data/ikuaiview.db；docker-compose 已挂载 ./data:/data
+DATA_DIR = os.environ.get("IKUAIVIEW_DATA_DIR", "/data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "ikuaiview.db")
+
+def _db_conn():
+    c = sqlite3.connect(DB_PATH, timeout=10)
+    c.row_factory = sqlite3.Row
+    return c
+
+def _init_db():
+    c = _db_conn()
+    c.executescript("""
+    CREATE TABLE IF NOT EXISTS iface_daily_bytes (
+        ts INTEGER NOT NULL,                       -- stat row timestamp (unix)
+        interface TEXT NOT NULL,
+        upload INTEGER NOT NULL,
+        download INTEGER NOT NULL,
+        PRIMARY KEY (ts, interface)
+    );
+
+    CREATE TABLE IF NOT EXISTS device_monthly_bytes (
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL,
+        ip TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        upload INTEGER NOT NULL DEFAULT 0,
+        download INTEGER NOT NULL DEFAULT 0,
+        last_seen INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (year, month, ip)
+    );
+
+    -- 爱快每次启动后的当前累计字节，用来在重启后差值修正
+    CREATE TABLE IF NOT EXISTS reboot_baseline (
+        ip TEXT PRIMARY KEY,
+        booted_at INTEGER NOT NULL,                -- 这台爱快本次启动时间 (unix)
+        curr_down INTEGER NOT NULL DEFAULT 0,
+        curr_up INTEGER NOT NULL DEFAULT 0,
+        month_down INTEGER NOT NULL DEFAULT 0,
+        month_up INTEGER NOT NULL DEFAULT 0,
+        last_seen INTEGER NOT NULL DEFAULT 0       -- 最近一次持久化的时间
+    );
+
+    CREATE TABLE IF NOT EXISTS system_boot_track (
+        booted_at INTEGER PRIMARY KEY,             -- 每次启动的 uptime 翻转点
+        recorded_at INTEGER NOT NULL
+    );
+    """)
+    c.commit()
+    c.close()
+
+_init_db()
+# 兼容前版本：若 reboot_baseline 缺 last_seen 列则补
+try:
+    _c = _db_conn()
+    cols = [r[1] for r in _c.execute("PRAGMA table_info(reboot_baseline)").fetchall()]
+    if cols and "last_seen" not in cols:
+        _c.execute("ALTER TABLE reboot_baseline ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0")
+        _c.commit()
+    _c.close()
+except Exception as _e:
+    print("[init] reboot_baseline migration failed (continue):", _e)
+db_lock = threading.Lock()
+
+print(f"[init] DB at {DB_PATH}, TZ=Asia/Shanghai fallback enabled")
+
 
 def tcp_probe(host, port=443, timeout=2.0):
     """TCP connect RTT 探测（ms）。失败返回 None。"""
@@ -96,28 +198,104 @@ def refresh_probes(force=False):
     return items
 
 def fetch_monthly_usage_gb():
-    """Use iKuai's native network-usage counter, not Prometheus.
+    """本月 WAN 累计流量（GB）—— 不再依赖 iface_stream 内存计数器。
 
-    iKuai's System Overview presents the LAN aggregate (upload + download)
-    from monitor_iface/iface_stream.  This is the router-owned value and
-    survives exporter/Prometheus retention changes.
+    旧实现用 iface_stream 的 total_up/total_down：这是爱快系统启动以来的累计，
+    爱快重启即清零 → 看板把"系统启动到现在的累计"误当成"本月累计"。
+
+    修复方案：
+      1) 优先用 iKuai `monitor_iface TYPE=all` 返回的 iface_stat_data：
+         每天一行的 total_download/total_upload，按北京时间筛选本月范围，
+         求和即真本月累计；爱快把数字写到磁盘，重启不清零。
+      2) 持久化到 SQLite，避免 iface_stat_data 滚动后丢失（爱快只保留近 7 天）。
+      3) 配合 iface_stream 当日值做"今天截至当前"的尾巴，避免漏算今日。
     """
     now = time.time()
-    if monthly_usage_cache["ts"] and now - monthly_usage_cache["ts"] < 60:
+    if monthly_usage_cache["ts"] and now - monthly_usage_cache["ts"] < 30:
         return monthly_usage_cache["gb"], monthly_usage_cache["covered_seconds"]
+
+    # 本月 1 日 00:00 北京时间对应的 Unix 时戳（含.gz 等 8 字节对齐）
+    month_start = _month_start_ts_cn(int(now))
+
+    total_bytes_month = 0
+    seen_keys = set()  # (ts, interface) 去重，避免重复录入 iface_stat_data 行
+
+    # 1) 落盘历史：iface_stat_data
     with extra_cache_lock:
+        stat_rows = list(ikuai_extra_cache.get("iface_monthly_stats") or [])
         stream_rows = list(ikuai_extra_cache.get("iface_stream") or [])
-    try:
-        row = next((item for item in stream_rows if item.get("interface") == "lan1"), None)
-        if row is None:
-            return monthly_usage_cache.get("gb", 0.0), monthly_usage_cache.get("covered_seconds", 0)
-        total_bytes = int(float(row.get("total_up") or 0)) + int(float(row.get("total_down") or 0))
-        gb = round(total_bytes / 1_000_000_000, 1)
-        monthly_usage_cache.update({"gb": gb, "covered_seconds": 31 * 86400, "ts": now})
-        return gb, 31 * 86400
-    except Exception as e:
-        print("[monthly] iKuai native usage failed:", e)
-        return monthly_usage_cache.get("gb", 0.0), monthly_usage_cache.get("covered_seconds", 0)
+
+    with db_lock:
+        c = _db_conn()
+        try:
+            # 把 iface_stat_data 中的 wan1 行写入 database，去重
+            for row in stat_rows:
+                iface = str(row.get("interface") or "")
+                if iface != "wan1":
+                    continue
+                ts = int(row.get("timestamp") or 0)
+                if ts <= 0:
+                    continue
+                # 只统计本月（按北京日期判定）的行
+                if ts < month_start:
+                    continue
+                up = int(float(row.get("total_upload") or 0))
+                down = int(float(row.get("total_download") or 0))
+                key = (ts, iface)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                c.execute("""INSERT INTO iface_daily_bytes (ts,interface,upload,download)
+                              VALUES (?,?,?,?)
+                              ON CONFLICT(ts,interface) DO UPDATE SET
+                                  upload=excluded.upload, download=excluded.download""",
+                          (ts, iface, up, down))
+            c.commit()
+
+            # 累加本月所有落盘的 wan1 行
+            cur = c.execute("""SELECT IFNULL(SUM(upload),0) as u, IFNULL(SUM(download),0) as d
+                               FROM iface_daily_bytes
+                               WHERE interface='wan1' AND ts >= ?""",
+                            (month_start,))
+            row = cur.fetchone()
+            total_bytes_month = int(row["u"]) + int(row["d"])
+        finally:
+            c.close()
+
+    # 2) 今日尾巴：iface_stream 当日的 total_up/total_down 与今日最新已落盘行做差，
+    #    取"今天截至当前的流量"加进总和。如果当天尚未落盘（爱快每天 00:00 才落盘），
+    #    则把 iface_stream 全量计作今日尾巴。
+    wan1_stream = next((r for r in stream_rows if r.get("interface") == "wan1"), None)
+    if wan1_stream:
+        today_up = int(float(wan1_stream.get("total_up") or 0))
+        today_down = int(float(wan1_stream.get("total_down") or 0))
+        # 找今日已落盘的最近一行 wan1
+        today_bytes_in_db = 0
+        with db_lock:
+            c = _db_conn()
+            try:
+                # 当天已落盘行：北京日期 ==今天 的最大 ts 行
+                today_ym = _cn_ym(int(now))
+                cur = c.execute("""SELECT ts, upload, download FROM iface_daily_bytes
+                                   WHERE interface='wan1'
+                                   ORDER BY ts DESC LIMIT 7""")
+                for r in cur.fetchall():
+                    ts = int(r["ts"])
+                    if today_ym == _cn_ym(ts):
+                        today_bytes_in_db = int(r["upload"]) + int(r["download"])
+                        break
+            finally:
+                c.close()
+        # iface_stream 是"系统启动以来累计"——爱快今天没重启就接近"今日截至当前"
+        # 如果今天刚重启，iface_stream 是从 0 累计到现在的今日尾巴；
+        # 如果今天没重启，iface_stream 的差值 = 今日（day 自然滚动）累计
+        # 没法精确分单日和跨日，故取 max(today_stream - today_db, 0)
+        tail = max(0, (today_up + today_down) - today_bytes_in_db)
+        total_bytes_month += tail
+
+    gb = round(total_bytes_month / 1_000_000_000, 1)
+    monthly_usage_cache.update({"gb": gb, "covered_seconds": 31 * 86400, "ts": now})
+    return gb, 31 * 86400
 
 def rate_to_bps(val):
     """exporter 的 *_kbytes_per_second 实际更接近 B/s 量级的瞬时值。
@@ -166,23 +344,22 @@ def fetch_ikuai_metadata():
         return None
 
     # 串行拉取，避免并发登录导致偶发空结果
-    if not metadata_fetch_lock.acquire(blocking=False):
+    acquired = metadata_fetch_lock.acquire(blocking=False)
+    if not acquired:
         return None
     try:
         return _fetch_ikuai_metadata_locked()
     finally:
-        metadata_fetch_lock.release()
+        if acquired:
+            metadata_fetch_lock.release()
 
 
 def _fetch_ikuai_metadata_locked():
     if not IKUAI_PASS:
         return None
 
-    sess_key = None
-    passwd_md5 = hashlib.md5(IKUAI_PASS.encode("utf-8")).hexdigest()
-
-    # 1. 登录
-    try:
+    def _login():
+        passwd_md5 = hashlib.md5(IKUAI_PASS.encode("utf-8")).hexdigest()
         login_payload = {"username": IKUAI_USER, "passwd": passwd_md5}
         req = urllib.request.Request(
             f"{IKUAI_URL}/Action/login",
@@ -195,15 +372,23 @@ def _fetch_ikuai_metadata_locked():
                 for p in c.split(";"):
                     p = p.strip()
                     if p.startswith("sess_key="):
-                        sess_key = p.split("=", 1)[1]
-                        break
-    except Exception as e:
-        print("[Poller] Login failed:", e)
+                        return p.split("=", 1)[1]
         return None
 
-    if not sess_key:
-        print("[Poller] Login failed: sess_key not found in cookie header.")
-        return None
+    now = time.time()
+    with session_lock:
+        sess_key = ikuai_session.get("sess_key")
+        if not sess_key or now - float(ikuai_session.get("ts") or 0) > SESSION_TTL:
+            try:
+                sess_key = _login()
+            except Exception as e:
+                print("[Poller] Login failed:", e)
+                return None
+            if not sess_key:
+                print("[Poller] Login failed: sess_key not found in cookie header.")
+                return None
+            ikuai_session["sess_key"] = sess_key
+            ikuai_session["ts"] = now
 
     cookie_str = f"sess_key={sess_key}"
     by_ip = {}
@@ -358,13 +543,16 @@ def _fetch_ikuai_metadata_locked():
             up = row.get("pppoe_updatetime") or row.get("updatetime") or 0
             if up:
                 try:
-                    up_ts = int(up)
+                    up_ts = int(float(up))
                     if up_ts > 0:
                         diff = int(time.time()) - up_ts
                         extra["wan_dial_duration_seconds"] = max(0, diff)
-                        extra["wan_dial_time_str"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(up_ts))
-                except:
-                    pass
+                        # 用北京时间显示，不依赖容器 TZ；原 localtime 在 UTC 容器会差 8h
+                        extra["wan_dial_time_str"] = _fmt_cn_time(up_ts)
+                        # 同时保留 Unix 时戳，前端可选展示
+                        extra["wan_dial_time_ts"] = up_ts
+                except Exception as _e:
+                    print("[Poller] wan_dial_time parse failed:", _e)
             dns1 = row.get("pppoe_dns1") or row.get("dhcp_dns1") or ""
             dns2 = row.get("pppoe_dns2") or row.get("dhcp_dns2") or ""
             if dns1: extra["dns"].append(dns1)
@@ -458,7 +646,7 @@ def ikuai_metadata_poller():
             fetch_ikuai_metadata()
         except Exception as e:
             print("[Poller] Error in poller cycle:", e)
-        time.sleep(10.0)
+        time.sleep(20.0)
 
 # 启动 poller 线程
 poller_thread = threading.Thread(target=ikuai_metadata_poller, daemon=True)
@@ -674,20 +862,164 @@ def fetch_exporter_metrics():
         pass
     return data
 
+
+# ── 终端字节持久化：把 exporter 每次上报的 (current_bytes) 落库后计算「本月累计」
+#    爱快 monitor_lanip 在每次重启清零，监控层补一个差值修正机制。
+#    重启点用 sys_uptime（exporter 上的 ikuai_uptime{host}）判定：
+#    每隔 N 秒轮询，若发现 uptime 比上次小或等于 baseline，视为爱快重启了一次。
+
+def persist_device_bytes_snapshot(devices, sys_uptime):
+    """把 exporter 设备字节累加到本月账本（跨爱快重启不丢）。
+
+    规则：
+      - reboot_baseline：本轮爱快启动内 last-seen 字节，只用于算 delta
+      - device_monthly_bytes：本月权威累计，只做 delta 增量
+      - 重启判定：sys_uptime 相对上次明显回落（而不是 boot_ts 绝对差）
+      - 重启后：清空 baseline，不把新一轮 curr 直接写入 monthly（避免重复/清零）
+      - 本月首次见到某 IP：用当前 curr 作为初始月累计（最佳估计）
+    """
+    if not devices:
+        return devices
+    now_ts = int(time.time())
+    ym_year, ym_month = _cn_ym(now_ts)
+    if ym_year == 0:
+        return devices
+    sys_uptime = max(0, int(sys_uptime or 0))
+
+    with db_lock:
+        c = _db_conn()
+        try:
+            # host 行：booted_at 字段复用为 last_uptime（秒）
+            host = c.execute("SELECT booted_at FROM reboot_baseline WHERE ip='__host__'").fetchone()
+            last_uptime = int(host["booted_at"]) if host else -1
+            rebooted = (last_uptime < 0) or (sys_uptime + 10 < last_uptime)
+            if rebooted and last_uptime >= 0:
+                print(f"[reboot] iKuai reboot detected: uptime {last_uptime}s -> {sys_uptime}s; baselines reset")
+                c.execute("DELETE FROM reboot_baseline")
+            # 更新/写入 host last_uptime
+            c.execute(
+                """INSERT INTO reboot_baseline (ip, booted_at, curr_down, curr_up, month_down, month_up, last_seen)
+                   VALUES ('__host__', ?, 0, 0, 0, 0, ?)
+                   ON CONFLICT(ip) DO UPDATE SET booted_at=excluded.booted_at, last_seen=excluded.last_seen""",
+                (sys_uptime, now_ts),
+            )
+
+            out = []
+            for dev in devices:
+                ip = (dev.get("ip") or "").strip()
+                if not ip:
+                    out.append(dev)
+                    continue
+                curr_down = int(float(dev.get("down_bytes", 0) or 0))
+                curr_up = int(float(dev.get("up_bytes", 0) or 0))
+                name = dev.get("name") or ""
+
+                base = c.execute(
+                    "SELECT curr_down, curr_up FROM reboot_baseline WHERE ip=?", (ip,)
+                ).fetchone()
+                monthly = c.execute(
+                    "SELECT upload, download FROM device_monthly_bytes WHERE year=? AND month=? AND ip=?",
+                    (ym_year, ym_month, ip),
+                ).fetchone()
+
+                if base is None:
+                    # 新周期首次见到：建立 baseline，不把 curr 当 delta
+                    c.execute(
+                        """INSERT INTO reboot_baseline (ip, booted_at, curr_down, curr_up, month_down, month_up, last_seen)
+                           VALUES (?,?,?,?,0,0,?)""",
+                        (ip, sys_uptime, curr_down, curr_up, now_ts),
+                    )
+                    if monthly is None:
+                        # 本月首次：用当前会话累计作初始值
+                        c.execute(
+                            """INSERT INTO device_monthly_bytes (year, month, ip, name, upload, download, last_seen)
+                               VALUES (?,?,?,?,?,?,?)""",
+                            (ym_year, ym_month, ip, name, curr_up, curr_down, now_ts),
+                        )
+                        month_up, month_down = curr_up, curr_down
+                    else:
+                        # 本月已有账本（爱快重启后）：只更新名称/时间
+                        c.execute(
+                            """UPDATE device_monthly_bytes SET
+                                   name=COALESCE(NULLIF(?, ''), name), last_seen=?
+                               WHERE year=? AND month=? AND ip=?""",
+                            (name, now_ts, ym_year, ym_month, ip),
+                        )
+                        month_up = int(monthly["upload"])
+                        month_down = int(monthly["download"])
+                else:
+                    prev_down = int(base["curr_down"])
+                    prev_up = int(base["curr_up"])
+                    delta_down = (curr_down - prev_down) if curr_down >= prev_down else 0
+                    delta_up = (curr_up - prev_up) if curr_up >= prev_up else 0
+                    c.execute(
+                        """UPDATE reboot_baseline SET curr_down=?, curr_up=?, booted_at=?, last_seen=?
+                           WHERE ip=?""",
+                        (curr_down, curr_up, sys_uptime, now_ts, ip),
+                    )
+                    if monthly is None:
+                        # 异常兜底：没有月账本则用 curr 初始化
+                        c.execute(
+                            """INSERT INTO device_monthly_bytes (year, month, ip, name, upload, download, last_seen)
+                               VALUES (?,?,?,?,?,?,?)""",
+                            (ym_year, ym_month, ip, name, curr_up, curr_down, now_ts),
+                        )
+                        month_up, month_down = curr_up, curr_down
+                    else:
+                        if delta_down > 0 or delta_up > 0:
+                            c.execute(
+                                """UPDATE device_monthly_bytes SET
+                                       name=COALESCE(NULLIF(?, ''), name),
+                                       upload=upload+?, download=download+?, last_seen=?
+                                   WHERE year=? AND month=? AND ip=?""",
+                                (name, delta_up, delta_down, now_ts, ym_year, ym_month, ip),
+                            )
+                        else:
+                            c.execute(
+                                """UPDATE device_monthly_bytes SET
+                                       name=COALESCE(NULLIF(?, ''), name), last_seen=?
+                                   WHERE year=? AND month=? AND ip=?""",
+                                (name, now_ts, ym_year, ym_month, ip),
+                            )
+                        mr = c.execute(
+                            "SELECT upload, download FROM device_monthly_bytes WHERE year=? AND month=? AND ip=?",
+                            (ym_year, ym_month, ip),
+                        ).fetchone()
+                        month_up = int(mr["upload"]) if mr else int(monthly["upload"]) + delta_up
+                        month_down = int(mr["download"]) if mr else int(monthly["download"]) + delta_down
+
+                out.append({**dev, "down_bytes": month_down, "up_bytes": month_up})
+
+            c.commit()
+            return out
+        except Exception as e:
+            print("[device-bytes] persist failed:", e)
+            import traceback
+            traceback.print_exc()
+            try:
+                c.rollback()
+            except Exception:
+                pass
+            return devices
+        finally:
+            c.close()
+
+
 def make_snapshot_payload(data):
     """生成完美符合 iKuaiView DashboardSnapshot 数据结构"""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
 
     devices = []
-    for dev in data.get("devices", []):
+    _raw_devices = persist_device_bytes_snapshot(data.get("devices", []), int(data.get("uptime", 0) or 0))
+    for dev in _raw_devices:
         devices.append({
-            "mac": dev["mac"],
-            "hostname": dev["name"],
-            "ip": dev["ip"],
-            "device_type": dev["device_type"],
+            "mac": dev.get("mac", ""),
+            "hostname": dev.get("name", "") or dev.get("ip", ""),
+            "ip": dev.get("ip", ""),
+            "device_type": dev.get("device_type", "desktop"),
             "signal": None,
             "connected_duration": 3600,
-            "dhcp_status": "bound" if not dev["static_bind"] else "static",
+            "dhcp_status": "bound" if not dev.get("static_bind", False) else "static",
             "dhcp_expires": None,
             "interface": "lan1",
             "arp_status": "reachable",
