@@ -198,102 +198,67 @@ def refresh_probes(force=False):
     return items
 
 def fetch_monthly_usage_gb():
-    """本月 WAN 累计流量（GB）—— 不再依赖 iface_stream 内存计数器。
+    """本月 WAN 用量（GB）——优先对齐爱快系统概览。
 
-    旧实现用 iface_stream 的 total_up/total_down：这是爱快系统启动以来的累计，
-    爱快重启即清零 → 看板把"系统启动到现在的累计"误当成"本月累计"。
+    权威来源：homepage TYPE=all → results.wan_stat.total（字节）
+    爱快 Web UI「本月数据使用情况」显示的是 total / 1024**3（习惯称 GB，实为 GiB）。
 
-    修复方案：
-      1) 优先用 iKuai `monitor_iface TYPE=all` 返回的 iface_stat_data：
-         每天一行的 total_download/total_upload，按北京时间筛选本月范围，
-         求和即真本月累计；爱快把数字写到磁盘，重启不清零。
-      2) 持久化到 SQLite，避免 iface_stat_data 滚动后丢失（爱快只保留近 7 天）。
-      3) 配合 iface_stream 当日值做"今天截至当前"的尾巴，避免漏算今日。
+    回退：iface_stat_data 日统计累加 + SQLite（当 homepage 暂不可用时）。
     """
     now = time.time()
-    if monthly_usage_cache["ts"] and now - monthly_usage_cache["ts"] < 30:
+    if monthly_usage_cache["ts"] and now - monthly_usage_cache["ts"] < 15:
         return monthly_usage_cache["gb"], monthly_usage_cache["covered_seconds"]
 
-    # 本月 1 日 00:00 北京时间对应的 Unix 时戳（含.gz 等 8 字节对齐）
-    month_start = _month_start_ts_cn(int(now))
-
-    total_bytes_month = 0
-    seen_keys = set()  # (ts, interface) 去重，避免重复录入 iface_stat_data 行
-
-    # 1) 落盘历史：iface_stat_data
+    # 1) 权威：homepage.wan_stat.total
     with extra_cache_lock:
-        stat_rows = list(ikuai_extra_cache.get("iface_monthly_stats") or [])
+        total_bytes = int(ikuai_extra_cache.get("homepage_wan_month_total_bytes") or 0)
         stream_rows = list(ikuai_extra_cache.get("iface_stream") or [])
+        stat_rows = list(ikuai_extra_cache.get("iface_monthly_stats") or [])
 
+    if total_bytes > 0:
+        # 与爱快主页一致：按 GiB 显示，保留 2 位小数更贴近 892.09
+        gb = round(total_bytes / (1024 ** 3), 2)
+        monthly_usage_cache.update({"gb": gb, "covered_seconds": 31 * 86400, "ts": now})
+        return gb, 31 * 86400
+
+    # 2) 回退：iface_stat_data 本月累加（十进制 GB）
+    month_start = _month_start_ts_cn(int(now))
+    total_bytes_month = 0
     with db_lock:
         c = _db_conn()
         try:
-            # 把 iface_stat_data 中的 wan1 行写入 database，去重
             for row in stat_rows:
                 iface = str(row.get("interface") or "")
                 if iface != "wan1":
                     continue
                 ts = int(row.get("timestamp") or 0)
-                if ts <= 0:
-                    continue
-                # 只统计本月（按北京日期判定）的行
                 if ts < month_start:
                     continue
                 up = int(float(row.get("total_upload") or 0))
                 down = int(float(row.get("total_download") or 0))
-                key = (ts, iface)
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                c.execute("""INSERT INTO iface_daily_bytes (ts,interface,upload,download)
-                              VALUES (?,?,?,?)
-                              ON CONFLICT(ts,interface) DO UPDATE SET
-                                  upload=excluded.upload, download=excluded.download""",
-                          (ts, iface, up, down))
+                c.execute(
+                    """INSERT INTO iface_daily_bytes (ts,interface,upload,download)
+                       VALUES (?,?,?,?)
+                       ON CONFLICT(ts,interface) DO UPDATE SET
+                         upload=excluded.upload, download=excluded.download""",
+                    (ts, iface, up, down),
+                )
             c.commit()
-
-            # 累加本月所有落盘的 wan1 行
-            cur = c.execute("""SELECT IFNULL(SUM(upload),0) as u, IFNULL(SUM(download),0) as d
-                               FROM iface_daily_bytes
-                               WHERE interface='wan1' AND ts >= ?""",
-                            (month_start,))
+            cur = c.execute(
+                """SELECT IFNULL(SUM(upload),0) as u, IFNULL(SUM(download),0) as d
+                   FROM iface_daily_bytes WHERE interface='wan1' AND ts >= ?""",
+                (month_start,),
+            )
             row = cur.fetchone()
             total_bytes_month = int(row["u"]) + int(row["d"])
         finally:
             c.close()
 
-    # 2) 今日尾巴：iface_stream 当日的 total_up/total_down 与今日最新已落盘行做差，
-    #    取"今天截至当前的流量"加进总和。如果当天尚未落盘（爱快每天 00:00 才落盘），
-    #    则把 iface_stream 全量计作今日尾巴。
     wan1_stream = next((r for r in stream_rows if r.get("interface") == "wan1"), None)
-    if wan1_stream:
-        today_up = int(float(wan1_stream.get("total_up") or 0))
-        today_down = int(float(wan1_stream.get("total_down") or 0))
-        # 找今日已落盘的最近一行 wan1
-        today_bytes_in_db = 0
-        with db_lock:
-            c = _db_conn()
-            try:
-                # 当天已落盘行：北京日期 ==今天 的最大 ts 行
-                today_ym = _cn_ym(int(now))
-                cur = c.execute("""SELECT ts, upload, download FROM iface_daily_bytes
-                                   WHERE interface='wan1'
-                                   ORDER BY ts DESC LIMIT 7""")
-                for r in cur.fetchall():
-                    ts = int(r["ts"])
-                    if today_ym == _cn_ym(ts):
-                        today_bytes_in_db = int(r["upload"]) + int(r["download"])
-                        break
-            finally:
-                c.close()
-        # iface_stream 是"系统启动以来累计"——爱快今天没重启就接近"今日截至当前"
-        # 如果今天刚重启，iface_stream 是从 0 累计到现在的今日尾巴；
-        # 如果今天没重启，iface_stream 的差值 = 今日（day 自然滚动）累计
-        # 没法精确分单日和跨日，故取 max(today_stream - today_db, 0)
-        tail = max(0, (today_up + today_down) - today_bytes_in_db)
-        total_bytes_month += tail
+    if wan1_stream and total_bytes_month == 0:
+        total_bytes_month = int(float(wan1_stream.get("total_up") or 0)) + int(float(wan1_stream.get("total_down") or 0))
 
-    gb = round(total_bytes_month / 1_000_000_000, 1)
+    gb = round(total_bytes_month / (1024 ** 3), 2)
     monthly_usage_cache.update({"gb": gb, "covered_seconds": 31 * 86400, "ts": now})
     return gb, 31 * 86400
 
@@ -411,7 +376,10 @@ def _fetch_ikuai_metadata_locked():
         with urllib.request.urlopen(req, timeout=8) as res:
             body = json.loads(res.read().decode("utf-8"))
         results_obj = body.get("results") or {}
-        if isinstance(results_obj, dict) and "data" in results_obj:
+        # 列表型接口：results.data
+        if isinstance(results_obj, dict) and "data" in results_obj and not any(
+            k in results_obj for k in ("wan_stat", "wans_stat", "sysstat", "cpu", "memory")
+        ):
             return results_obj.get("data", []) or []
         return results_obj
 
@@ -533,7 +501,11 @@ def _fetch_ikuai_metadata_locked():
             "icmp": 0
         },
         "iface_monthly_stats": [],
-        "iface_stream": []
+        "iface_stream": [],
+        # 爱快系统概览「本月数据使用情况」权威值（homepage.wan_stat.total，字节）
+        "homepage_wan_month_total_bytes": 0,
+        "homepage_wan_isp": "",
+        "homepage_wan_ip": "",
     }
 
     try:
@@ -622,10 +594,15 @@ def _fetch_ikuai_metadata_locked():
     except Exception as e:
         print("[Poller] Extra dnat failed:", e)
 
-    # iKuai's own interface-accounting snapshots.  Keep WAN rows only;
-    # monthly usage uses these rather than Prometheus-retention-derived data.
+    # iKuai interface snapshots (fallback / device analytics)
     try:
         res = _call("monitor_iface", {"TYPE": "all"})
+        if not isinstance(res, dict):
+            # _call may return list or nested; normalize
+            res = {}
+        # monitor_iface sometimes returns the results object directly, sometimes nested
+        if "iface_stat_data" not in res and isinstance(res.get("results"), dict):
+            res = res.get("results") or {}
         stat_rows = res.get("iface_stat_data", []) if isinstance(res, dict) else []
         extra["iface_monthly_stats"] = [
             row for row in stat_rows if str(row.get("interface") or "") == "wan1"
@@ -633,6 +610,40 @@ def _fetch_ikuai_metadata_locked():
         extra["iface_stream"] = res.get("iface_stream", []) if isinstance(res, dict) else []
     except Exception as e:
         print("[Poller] iKuai monthly accounting failed:", e)
+
+    # 系统概览主页 WAN 本月用量（与 Web UI「本月数据使用情况」同源）
+    try:
+        home = _call("homepage", {"TYPE": "all"})
+        # _call returns results.data or results object depending on shape
+        if isinstance(home, dict) and "wan_stat" not in home:
+            # maybe still wrapped
+            home = home.get("results") or home
+        wan_stat = {}
+        if isinstance(home, dict):
+            wan_stat = home.get("wan_stat") or {}
+            if not wan_stat:
+                wans = home.get("wans_stat") or []
+                if isinstance(wans, list) and wans:
+                    wan_stat = wans[0]
+        if isinstance(wan_stat, dict) and wan_stat:
+            total = int(float(wan_stat.get("total") or 0))
+            extra["homepage_wan_month_total_bytes"] = max(0, total)
+            extra["homepage_wan_isp"] = str(wan_stat.get("isp") or "")
+            extra["homepage_wan_ip"] = str(wan_stat.get("ip_addr") or "")
+            # 若拨号时间缺失，用 homepage 的 updatetime 兜底
+            if not extra.get("wan_dial_time_ts"):
+                up = wan_stat.get("updatetime") or 0
+                try:
+                    up_ts = int(float(up))
+                    if up_ts > 0:
+                        extra["wan_dial_duration_seconds"] = max(0, int(time.time()) - up_ts)
+                        extra["wan_dial_time_str"] = _fmt_cn_time(up_ts)
+                        extra["wan_dial_time_ts"] = up_ts
+                except Exception:
+                    pass
+            print(f"[Poller] homepage wan_stat total_bytes={extra['homepage_wan_month_total_bytes']} isp={extra['homepage_wan_isp']}")
+    except Exception as e:
+        print("[Poller] homepage wan_stat failed:", e)
 
     with extra_cache_lock:
         global ikuai_extra_cache
