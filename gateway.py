@@ -58,6 +58,13 @@ monthly_usage_cache = {"gb": 0.0, "covered_seconds": 0, "ts": 0}
 homepage_usage_cache = {"total_bytes": 0, "isp": "", "ip": "", "ts": 0}
 HOMEPAGE_USAGE_TTL = int(os.environ.get("IKUAIVIEW_HOMEPAGE_TTL", "300"))  # 默认 5 分钟
 METADATA_POLL_SECONDS = int(os.environ.get("IKUAIVIEW_METADATA_POLL_SECONDS", "30"))
+# 看板 WS 推送间隔（秒）。jakes/ikuai-exporter 是“拉 /metrics 时实时回源爱快”，
+# 若不缓存，会表现为后台 api 每 N 秒登录/调用。
+WS_PUSH_SECONDS = float(os.environ.get("IKUAIVIEW_WS_PUSH_SECONDS", "5"))
+# exporter /metrics 本地缓存，把多客户端/高频 WS 合并为低频回源
+EXPORTER_CACHE_TTL = float(os.environ.get("IKUAIVIEW_EXPORTER_CACHE_TTL", "5"))
+exporter_metrics_cache = {"parsed": None, "ts": 0, "error": None}
+exporter_cache_lock = threading.Lock()
 
 
 # ── 时区：爱快 pppoe_updatetime 是 Unix 时戳（UTC 秒），但拨号时间应按北京时间显示。
@@ -684,12 +691,28 @@ poller_thread = threading.Thread(target=ikuai_metadata_poller, daemon=True)
 poller_thread.start()
 
 def fetch_exporter_metrics():
+    """拉取 exporter 指标；带本地 TTL 缓存，避免看板高频轮询触发爱快登录风暴。"""
+    now = time.time()
+    with exporter_cache_lock:
+        if (
+            exporter_metrics_cache["parsed"] is not None
+            and now - float(exporter_metrics_cache.get("ts") or 0) < EXPORTER_CACHE_TTL
+        ):
+            cached = exporter_metrics_cache["parsed"]
+            return dict(cached) if isinstance(cached, dict) else cached
+        if exporter_metrics_cache.get("error") and now - float(exporter_metrics_cache.get("ts") or 0) < 1.0:
+            return {"error": exporter_metrics_cache["error"]}
+
     try:
         req = urllib.request.Request(f"{EXPORTER_URL}/metrics", headers={"User-Agent": "iKuai-Monitor-Gateway"})
         with urllib.request.urlopen(req, timeout=3) as response:
             content = response.read().decode('utf-8')
     except Exception as e:
-        return {"error": f"Failed to fetch exporter metrics: {str(e)}"}
+        err = f"Failed to fetch exporter metrics: {str(e)}"
+        with exporter_cache_lock:
+            exporter_metrics_cache["error"] = err
+            exporter_metrics_cache["ts"] = now
+        return {"error": err}
 
     data = {
         "cpu_usage": 0.0,
@@ -891,6 +914,10 @@ def fetch_exporter_metrics():
             pass
     except Exception:
         pass
+    with exporter_cache_lock:
+        exporter_metrics_cache["parsed"] = dict(data)
+        exporter_metrics_cache["ts"] = time.time()
+        exporter_metrics_cache["error"] = None
     return data
 
 
@@ -1252,9 +1279,9 @@ class WebHandler(BaseHTTPRequestHandler):
             if "error" not in metrics:
                 send_frame("snapshot", make_snapshot_payload(metrics))
 
-            # 2. 循环推送 update
+            # 2. 循环推送 update（默认 5s；配合 exporter 缓存，避免 2s 回源爱快）
             while True:
-                time.sleep(2.0)
+                time.sleep(max(2.0, WS_PUSH_SECONDS))
                 metrics = fetch_exporter_metrics()
                 if "error" not in metrics:
                     send_frame("update", make_update_payload(metrics))
@@ -1319,7 +1346,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 "password_set": bool(IKUAI_PASS),
                 "router_configured": bool(IKUAI_URL),
                 "accept_invalid_certs": True,
-                "poll_interval_secs": 2,
+                "poll_interval_secs": int(max(2.0, WS_PUSH_SECONDS)),
                 "probe_interval_secs": 60,
                 "db_raw_retention_days": 1,
                 "db_total_retention_days": 30,

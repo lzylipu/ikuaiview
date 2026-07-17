@@ -1,6 +1,9 @@
-# Prometheus 抓取配置（首次部署模板）
+# Prometheus 抓取配置（官方模板）
 # 目标使用 Compose 服务名 + 容器端口 9090
 # 不要写成宿主机映射端口（如 9191）
+#
+# jakes/ikuai-exporter 在每次 /metrics 时实时回源爱快 API。
+# 因此 scrape_interval 过短会放大登录/调用频率；推荐 30~60s。
 
 global:
   scrape_interval: 30s
@@ -8,6 +11,7 @@ global:
 
 scrape_configs:
   - job_name: ikuai
+    scrape_interval: 30s
     static_configs:
       - targets:
           - ikuai-exporter:9090
