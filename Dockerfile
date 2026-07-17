@@ -12,11 +12,7 @@ COPY gateway.py .
 COPY dist ./dist
 
 RUN chmod +x gateway.py \
- && adduser -D -H -u 10001 appuser \
- && mkdir -p /data \
- && chown -R appuser:appuser /app /data
-
-USER appuser
+ && mkdir -p /data
 
 ENV IKUAI_PORT=3000 \
     TZ=Asia/Shanghai \

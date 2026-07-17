@@ -78,7 +78,7 @@ services:
       IKUAI_PORT: "3000"
       # 北京时间显示（爱快 pppoe_updatetime 是 Unix 时戳，避免 UTC 容器导致连接时间差 8h）
       TZ: "Asia/Shanghai"
-      # SQLite 持久化路径（默认 /data，挂载到宿主 ./data，跨爱快重启不丢本月用量与终端累计）
+      # SQLite 持久化路径（默认 /data，挂载到宿主 ./data；容器默认 root 用户写 /data）
       IKUAIVIEW_DATA_DIR: "/data"
       # 本月用量来自 homepage（较重），默认 300s 刷新一次
       IKUAIVIEW_HOMEPAGE_TTL: "${IKUAIVIEW_HOMEPAGE_TTL:-300}"

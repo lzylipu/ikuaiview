@@ -38,13 +38,8 @@ else
   echo "ℹ️  prometheus/prometheus.yml already exists"
 fi
 
-# 看板容器以 uid 10001 写 SQLite，目录权限必须匹配
-if command -v chown >/dev/null 2>&1; then
-  chown -R 10001:10001 data 2>/dev/null || chmod -R a+rwX data 2>/dev/null || true
-else
-  chmod -R a+rwX data 2>/dev/null || true
-fi
-chmod -R a+rwX prometheus-data 2>/dev/null || true
+# data 目录给默认 root 用户写 SQLite；一般 mkdir 即可
+chmod -R a+rwX data prometheus-data 2>/dev/null || true
 
 echo
 echo "Next:"
