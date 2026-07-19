@@ -19,4 +19,6 @@ ENV IKUAI_PORT=3000 \
     IKUAIVIEW_DATA_DIR=/data
 EXPOSE 3000
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen("http://localhost:3000/api/health")" || exit 1
 ENTRYPOINT ["./gateway.py"]
