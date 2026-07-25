@@ -5,6 +5,7 @@ import re
 import time
 import json
 import socket
+import ssl
 import hashlib
 import base64
 import sqlite3
@@ -43,12 +44,23 @@ session_lock = threading.Lock()
 SESSION_TTL = 600  # 秒
 
 
-# 探针目标：配置后自动探测，无需 AI 干预
+# 探针目标：对齐 OpenClash「访问检查」延时检测语义
+#   - 阿里 DNS（国内直连）：TCP:53 connect，未被旁路由劫持
+#   - Google DNS / GitHub / YouTube（国际）：TLS 探测，计时到 TLS 握手完成时刻
+#     语义对齐 OpenClash `latency_test()` 的 `time_appconnect`：
+#     TCP connect 早被本地代理 hijack 返回 ~1ms 假值（旁路由 OpenClash 透明拦截），
+#     而 TLS 握手必须穿越完整代理链路到目标才完成，延时真实。
+#     详见 vernesong/OpenClash luasrc/controller/openclash.lua:2345 latency_test()
+#   字段：
+#     host       前端展示用的友好名（裸 IP 或域名，不带 www.）
+#     probe_host 内部握手探测点（拿得到 TLS 证书的真实域名；裸 IP 时同 host）
 PROBE_TARGETS = [
-    {"target": "阿里 DNS", "host": "223.5.5.5", "port": 53, "category": "dns"},
-    {"target": "Google DNS", "host": "8.8.8.8", "port": 53, "category": "dns"},
-    {"target": "GitHub", "host": "github.com", "port": 443, "category": "repo"},
-    {"target": "YouTube", "host": "youtube.com", "port": 443, "category": "cdn"},
+    # host 写 8.8.8.8 但探测点也是 8.8.8.8（裸 IP 走 TLS 证书名不匹配→握手失败→down，
+    # 这是物理真实：8.8.8.8 没对外提供 HTTPS 服务；侧面证明目标本身不挂 443）
+    {"target": "阿里 DNS",    "host": "223.5.5.5",  "probe_host": "223.5.5.5",  "mode": "tcp",  "port": 53,  "category": "dns"},
+    {"target": "Google DNS",  "host": "8.8.8.8",    "probe_host": "8.8.8.8",    "mode": "tls",  "port": 443, "category": "dns"},
+    {"target": "GitHub",      "host": "github.com", "probe_host": "github.com", "mode": "tls",  "port": 443, "category": "repo"},
+    {"target": "YouTube",     "host": "youtube.com","probe_host": "www.youtube.com", "mode": "tls",  "port": 443, "category": "cdn"},
 ]
 
 probe_cache = {"items": [], "ts": 0}
@@ -163,7 +175,7 @@ print(f"[init] DB at {DB_PATH}, TZ=Asia/Shanghai fallback enabled")
 
 
 def tcp_probe(host, port=443, timeout=2.0):
-    """TCP connect RTT 探测（ms）。失败返回 None。"""
+    """TCP connect RTT 探测（ms）。失败返回 None。国内直连目标用。"""
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         if not infos:
@@ -178,6 +190,26 @@ def tcp_probe(host, port=443, timeout=2.0):
             s.close()
         except Exception:
             pass
+        return ms
+    except Exception:
+        return None
+
+def tls_probe(host, port=443, timeout=5.0):
+    """TLS 握手完成时刻延时探测（ms）。失败返回 None。
+
+    对齐 OpenClash `latency_test()` 的 `time_appconnect`：
+    走代理路径时，TCP connect 早被本地透明代理(OpenClash/旁路由)截回 ~1ms 假值，
+    但 TLS 握手必须穿越完整代理链路与目标协商成功才会完成计时——延时真实。
+    关闭证书校验以兼容裸 IP 目标（如 8.8.8.8）；只要 TCP+TLS 协商成功即视为可达。
+    """
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    t0 = time.time()
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as _s:
+                ms = (time.time() - t0) * 1000.0
         return ms
     except Exception:
         return None
@@ -197,10 +229,16 @@ def refresh_probes(force=False):
         return probe_cache["items"]
     items = []
     for t in PROBE_TARGETS:
-        ms = tcp_probe(t["host"], t.get("port", 443), timeout=2.0)
+        mode = t.get("mode", "tcp")
+        # 探测真实握手点（probe_host），前端展示用 host（裸 IP / 不带 www. 的亲和名）
+        probe_host = t.get("probe_host") or t["host"]
+        if mode == "tls":
+            ms = tls_probe(probe_host, t.get("port", 443), timeout=5.0)
+        else:
+            ms = tcp_probe(probe_host, t.get("port", 443), timeout=2.0)
         items.append({
             "target": t["target"],
-            "host": t["host"],
+            "host": t["host"],   # 前端展示名（223.5.5.5 / 8.8.8.8 / github.com / youtube.com）
             "latency_ms": None if ms is None else round(ms, 1),
             "status": classify_latency(ms),
             "category": t["category"],
