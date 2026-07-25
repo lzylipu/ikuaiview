@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import os
 import re
+import sys
 import time
 import json
 import socket
@@ -12,8 +13,18 @@ import sqlite3
 import threading
 import urllib.parse
 import urllib.request
+import logging
 from datetime import datetime, timezone, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+# 日志：写到 stderr，容器日志收集器可直接pickup；DEBUG 由 env 控制便于排障
+logging.basicConfig(
+    level=os.environ.get("IKUAIVIEW_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    stream=sys.stderr,
+    force=True,
+)
+log = logging.getLogger("ikuaiview")
 
 # ── 配置 ─────────────────────────────────────────────────────────────
 EXPORTER_URL   = os.environ.get("IKUAI_EXPORTER_URL", "http://ikuai-exporter:9090")
@@ -168,10 +179,10 @@ try:
         _c.commit()
     _c.close()
 except Exception as _e:
-    print("[init] reboot_baseline migration failed (continue):", _e)
+    log.error("[init] reboot_baseline migration failed (continue): %s", _e)
 db_lock = threading.Lock()
 
-print(f"[init] DB at {DB_PATH}, TZ=Asia/Shanghai fallback enabled")
+log.info("[init] DB at %s, TZ=Asia/Shanghai fallback enabled", DB_PATH)
 
 
 def tcp_probe(host, port=443, timeout=2.0):
@@ -188,10 +199,10 @@ def tcp_probe(host, port=443, timeout=2.0):
         ms = (time.time() - t0) * 1000.0
         try:
             s.close()
-        except Exception:
+        except OSError:
             pass
         return ms
-    except Exception:
+    except (socket.timeout, ConnectionError, OSError):
         return None
 
 def tls_probe(host, port=443, timeout=5.0):
@@ -211,7 +222,7 @@ def tls_probe(host, port=443, timeout=5.0):
             with ctx.wrap_socket(sock, server_hostname=host) as _s:
                 ms = (time.time() - t0) * 1000.0
         return ms
-    except Exception:
+    except (socket.timeout, ConnectionError, ssl.SSLError, OSError):
         return None
 
 def classify_latency(ms):
@@ -397,10 +408,10 @@ def _fetch_ikuai_metadata_locked():
             try:
                 sess_key = _login()
             except Exception as e:
-                print("[Poller] Login failed:", e)
+                log.error("[Poller] Login failed: %s", e)
                 return None
             if not sess_key:
-                print("[Poller] Login failed: sess_key not found in cookie header.")
+                log.error("[Poller] Login failed: sess_key not found in cookie header.")
                 return None
             ikuai_session["sess_key"] = sess_key
             ikuai_session["ts"] = now
@@ -469,9 +480,9 @@ def _fetch_ikuai_metadata_locked():
             rec["mac"] = _norm_mac(item.get("mac", ""))
             rec["static_bind"] = True
             rec["source"] = "dhcp_static"
-        print(f"[Poller] dhcp_static entries: {len(static_list)} (by_ip={len(by_ip)})")
+        log.debug("[Poller] dhcp_static entries: %d (by_ip=%d)", len(static_list), len(by_ip))
     except Exception as e:
-        print("[Poller] Fetch dhcp_static failed:", e)
+        log.error("[Poller] Fetch dhcp_static failed: %s", e)
 
     # 3. ARP 表：按 IP 补真实 MAC / 备注（静态表没有时）
     try:
@@ -491,9 +502,9 @@ def _fetch_ikuai_metadata_locked():
             # 不把 ARP 备注写入 termname（留给展示层按优先级挑选），避免盖过本地别名
             if not rec.get("source"):
                 rec["source"] = "arp"
-        print(f"[Poller] arp entries: {len(arp_list)}")
+        log.debug("[Poller] arp entries: %d", len(arp_list))
     except Exception as e:
-        print("[Poller] Fetch arp failed:", e)
+        log.error("[Poller] Fetch arp failed: %s", e)
 
     # 4. monitor_lanip：只补 vendor/type/名称（静态&ARP 都没有时），MAC 仅作最后兜底
     try:
@@ -520,16 +531,16 @@ def _fetch_ikuai_metadata_locked():
             if not rec.get("source"):
                 rec["source"] = "monitor_lanip"
             # static_bind 只认 dhcp_static，不吃 monitor 的 static_status
-        print(f"[Poller] monitor_lanip entries: {len(dev_list)} (by_ip total={len(by_ip)})")
+        log.debug("[Poller] monitor_lanip entries: %d (by_ip total=%d)", len(dev_list), len(by_ip))
     except Exception as e:
-        print("[Poller] Fetch monitor_lanip failed:", e)
+        log.error("[Poller] Fetch monitor_lanip failed: %s", e)
 
     if by_ip:
         with cache_lock:
             global device_metadata_cache
             # 保留 by_mac 空 dict 兼容旧读取路径，但设备展示禁止 MAC 反查名称
             device_metadata_cache = {"by_ip": by_ip, "by_mac": {}}
-        print(f"[Poller] metadata ready: by_ip={len(by_ip)} (mac-fallback disabled)")
+        log.info("[Poller] metadata ready: by_ip=%d (mac-fallback disabled)", len(by_ip))
 
     # 4. 爱快额外详情 (WAN拨号时间, 链路检测, DNS, DHCP池, DNAT映射, 连接数细分)
     extra = {
@@ -574,13 +585,13 @@ def _fetch_ikuai_metadata_locked():
                         # 同时保留 Unix 时戳，前端可选展示
                         extra["wan_dial_time_ts"] = up_ts
                 except Exception as _e:
-                    print("[Poller] wan_dial_time parse failed:", _e)
+                    log.warning("[Poller] wan_dial_time parse failed: %s", _e)
             dns1 = row.get("pppoe_dns1") or row.get("dhcp_dns1") or ""
             dns2 = row.get("pppoe_dns2") or row.get("dhcp_dns2") or ""
             if dns1: extra["dns"].append(dns1)
             if dns2: extra["dns"].append(dns2)
     except Exception as e:
-        print("[Poller] Extra wan failed:", e)
+        log.error("[Poller] Extra wan failed: %s", e)
 
     try:
         res = _call("monitor_iface", {"TYPE": "iface_check"})
@@ -596,7 +607,7 @@ def _fetch_ikuai_metadata_locked():
             extra["link_check_status"] = c.get("result", "success")
             extra["link_check_errmsg"] = c.get("errmsg", "线路检测成功")
     except Exception as e:
-        print("[Poller] Extra iface failed:", e)
+        log.error("[Poller] Extra iface failed: %s", e)
 
     try:
         res = _call("sysstat", {"TYPE": "verinfo,cpu,memory,stream"})
@@ -609,7 +620,7 @@ def _fetch_ikuai_metadata_locked():
         extra["connections"]["udp"] = int(stream.get("udp_connect_num") or 0)
         extra["connections"]["icmp"] = int(stream.get("icmp_connect_num") or 0)
     except Exception as e:
-        print("[Poller] Extra sysstat failed:", e)
+        log.error("[Poller] Extra sysstat failed: %s", e)
 
     try:
         dhcp_list = _call("dhcp_server")
@@ -627,7 +638,7 @@ def _fetch_ikuai_metadata_locked():
             if d1: extra["dhcp"]["dns"].append(d1)
             if d2: extra["dhcp"]["dns"].append(d2)
     except Exception as e:
-        print("[Poller] Extra dhcp_server failed:", e)
+        log.error("[Poller] Extra dhcp_server failed: %s", e)
 
     try:
         dnat_list = _call("dnat")
@@ -642,7 +653,7 @@ def _fetch_ikuai_metadata_locked():
                     "proto": r.get("protocol", "tcp")
                 })
     except Exception as e:
-        print("[Poller] Extra dnat failed:", e)
+        log.error("[Poller] Extra dnat failed: %s", e)
 
     # iKuai interface snapshots (fallback / device analytics)
     try:
@@ -659,7 +670,7 @@ def _fetch_ikuai_metadata_locked():
         ]
         extra["iface_stream"] = res.get("iface_stream", []) if isinstance(res, dict) else []
     except Exception as e:
-        print("[Poller] iKuai monthly accounting failed:", e)
+        log.error("[Poller] iKuai monthly accounting failed: %s", e)
 
     # 系统概览主页 WAN 本月用量（与 Web UI「本月数据使用情况」同源）
     # homepage 接口重（实测约 1s+ / 170KB），默认 5 分钟拉一次，避免抬高爱快 CPU
@@ -702,9 +713,9 @@ def _fetch_ikuai_metadata_locked():
                             extra["wan_dial_time_ts"] = up_ts
                     except Exception:
                         pass
-                print(f"[Poller] homepage wan_stat total_bytes={extra['homepage_wan_month_total_bytes']} isp={extra['homepage_wan_isp']}")
+                log.info("[Poller] homepage wan_stat total_bytes=%s isp=%s", extra['homepage_wan_month_total_bytes'], extra['homepage_wan_isp'])
         except Exception as e:
-            print("[Poller] homepage wan_stat failed:", e)
+            log.error("[Poller] homepage wan_stat failed: %s", e)
             # 失败时沿用旧缓存
             extra["homepage_wan_month_total_bytes"] = int(homepage_usage_cache.get("total_bytes") or 0)
             extra["homepage_wan_isp"] = homepage_usage_cache.get("isp") or ""
@@ -713,7 +724,7 @@ def _fetch_ikuai_metadata_locked():
     with extra_cache_lock:
         global ikuai_extra_cache
         ikuai_extra_cache = extra
-    print(f"[Poller] extra details cached successfully: link_check={extra['link_check_status']}")
+    log.debug("[Poller] extra details cached: link_check=%s", extra['link_check_status'])
 
 
 def ikuai_metadata_poller():
@@ -721,7 +732,7 @@ def ikuai_metadata_poller():
         try:
             fetch_ikuai_metadata()
         except Exception as e:
-            print("[Poller] Error in poller cycle:", e)
+            log.error("[Poller] Error in poller cycle: %s", e)
         time.sleep(max(15, METADATA_POLL_SECONDS))
 
 # 启动 poller 线程
@@ -990,7 +1001,7 @@ def persist_device_bytes_snapshot(devices, sys_uptime):
             last_uptime = int(host["booted_at"]) if host else -1
             rebooted = (last_uptime < 0) or (sys_uptime + 10 < last_uptime)
             if rebooted and last_uptime >= 0:
-                print(f"[reboot] iKuai reboot detected: uptime {last_uptime}s -> {sys_uptime}s; baselines reset")
+                log.warning("[reboot] iKuai reboot detected: uptime %ss -> %ss; baselines reset", last_uptime, sys_uptime)
                 c.execute("DELETE FROM reboot_baseline")
             # 更新/写入 host last_uptime
             c.execute(
@@ -1089,7 +1100,7 @@ def persist_device_bytes_snapshot(devices, sys_uptime):
             c.commit()
             return out
         except Exception as e:
-            print("[device-bytes] persist failed:", e)
+            log.error("[device-bytes] persist failed: %s", e)
             import traceback
             traceback.print_exc()
             try:
@@ -1292,7 +1303,7 @@ class WebHandler(BaseHTTPRequestHandler):
 
         conn = self.connection
         conn.setblocking(True)
-        print("[WS] Connection upgraded successfully.")
+        log.info("[WS] Connection upgraded.")
 
         def send_frame(msg_type, data):
             envelope = {"type": msg_type, "data": data}
@@ -1324,7 +1335,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 if "error" not in metrics:
                     send_frame("update", make_update_payload(metrics))
         except Exception as e:
-            print("[WS] Connection closed:", e)
+            log.warning("[WS] Connection closed: %s", e)
         finally:
             conn.close()
 
@@ -1338,6 +1349,11 @@ class WebHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed_url.query)
 
         # ── REST API ────────────────────────────────────────────────
+        # 说明：本项目定位是只读/内网部署，看板自身不存在对外暴露面，因此：
+        #   - /api/auth/status、/api/auth/me  返回 stub「已认证 admin」，绕过前端期待的 OIDC 流程
+        #   - /api/devices、/api/probes、/api/oui 等返回空集合，看板实际数据走 WS snapshot/update
+        #   - /api/health 返 200 供 Dockerfile HEALTHCHECK / 编排系统探活
+        # 这些 stub 是有意为之，非真实鉴权实现；若走公网部署请前置反代 + 鉴权。
         if path == "/api/health":
             body = json.dumps({"status": "ok", "version": "1.0.0"}).encode('utf-8')
             self.send_response(200)
@@ -1517,7 +1533,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     ul = rate_to_bps(item[1])
                     points.append({"timestamp_ms": ts_ms, "download_bps": int(dl), "upload_bps": int(ul), "wan_name": wan_name_out})
             except Exception as e:
-                print("Failed query traffic range:", e)
+                log.error("Failed query traffic range: %s", e)
             if not points:
                 points.append({"timestamp_ms": start_ms, "download_bps": 0, "upload_bps": 0, "wan_name": wan_name_out})
             # enrich points with canonical optional fields expected by frontend
@@ -1617,8 +1633,17 @@ class WebHandler(BaseHTTPRequestHandler):
             return
 
         # ── 静态文件分发 & 路由兜底 ─────────────────────────────
+        # 防 ../ 路径穿越：先规范化绝对路径，再确认仍在 ASSET_DIR 内
+        asset_root = os.path.abspath(ASSET_DIR)
         clean_path = path.lstrip('/')
-        file_path = os.path.join(ASSET_DIR, clean_path)
+        candidate  = os.path.abspath(os.path.join(asset_root, clean_path))
+        if candidate != asset_root and not candidate.startswith(asset_root + os.sep):
+            self.send_response(403)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"Forbidden")
+            return
+        file_path = candidate
 
         mime_types = {
             ".html": "text/html; charset=utf-8",
@@ -1656,7 +1681,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Not Found")
 
 def run():
-    print(f"Starting iKuai Advanced Web Gateway on port {PORT}...")
+    log.info("Starting iKuai Advanced Web Gateway on port %s ...", PORT)
     server = ThreadingHTTPServer(('0.0.0.0', PORT), WebHandler)
     server.serve_forever()
 
