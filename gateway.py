@@ -1349,11 +1349,14 @@ class WebHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed_url.query)
 
         # ── REST API ────────────────────────────────────────────────
-        # 说明：本项目定位是只读/内网部署，看板自身不存在对外暴露面，因此：
-        #   - /api/auth/status、/api/auth/me  返回 stub「已认证 admin」，绕过前端期待的 OIDC 流程
-        #   - /api/devices、/api/probes、/api/oui 等返回空集合，看板实际数据走 WS snapshot/update
-        #   - /api/health 返 200 供 Dockerfile HEALTHCHECK / 编排系统探活
-        # 这些 stub 是有意为之，非真实鉴权实现；若走公网部署请前置反代 + 鉴权。
+        # 说明：本项目定位是只读看板，所有端点均为 GET、不接收用户写入、不持久化任何用户数据。
+        # 因已支持反代公网部署，威胁模型按"攻击者可直连此服务前端入口"建模 → 必须确保：
+        #   ① 入站参数（query string）经白名单净化后才参与任何下游构造（见 /api/traffic PromQL 防护）
+        #   ② 返回不携带内网拓扑/凭据用户名/自签证书容忍策略（见 /api/config 脱敏）
+        #   ③ 不发 Access-Control-Allow-Origin:*（同源策略已足够，避免跨站读）
+        # 一些端点对前端期待的 OIDC / 设备数据返回 stub「已认证 admin」/ 空集合，看板实际数据走
+        # WS snapshot/update。stub 仅是响应定型值，不存在可被提升的权限（后端无 POST/PUT/DELETE），
+        # 公网部署仍建议前置反代 + 鉴权以避免开放阅读面。
         if path == "/api/health":
             body = json.dumps({"status": "ok", "version": "1.0.0"}).encode('utf-8')
             self.send_response(200)
@@ -1390,16 +1393,18 @@ class WebHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/config/full" or path == "/api/config":
+            # 公网反代部署威胁模型：不返内网拓扑/凭据用户名/accept_invalid_certs 细节
+            # 前端仅用 password_set/router_configured 决定是否显示 setup 向导
             cfg = {
                 "router_type": "ikuai",
                 "revision": 1,
-                "router_host": IKUAI_HOST,
-                "router_port": 80,
+                "router_host": "",
+                "router_port": 0,
                 "router_scheme": "http",
-                "router_username": IKUAI_USER,
+                "router_username": "",
                 "password_set": bool(IKUAI_PASS),
                 "router_configured": bool(IKUAI_URL),
-                "accept_invalid_certs": True,
+                "accept_invalid_certs": False,
                 "poll_interval_secs": int(max(2.0, WS_PUSH_SECONDS)),
                 "probe_interval_secs": 60,
                 "db_raw_retention_days": 1,
@@ -1499,7 +1504,10 @@ class WebHandler(BaseHTTPRequestHandler):
             step = max(5, duration_s // 120)
             start_s = start_ms // 1000
             end_s = end_ms // 1000
-            wan_name = query.get("wan_name", ["wan1"])[0]
+            # 防 PromQL 注入：wan_name 直拼进 id="..." 选择器，必须白名单
+            # 仅允许字母/数字/_/-/，长度 ≤32; 不合法一律回退到默认 wan1
+            wan_name_raw = query.get("wan_name", ["wan1"])[0]
+            wan_name = wan_name_raw if re.fullmatch(r"[A-Za-z0-9_/-]{1,32}", wan_name_raw or "") else "wan1"
             wan_name_out = "wan1" if (not wan_name or wan_name == "*") else wan_name
             wan_query_id = wan_name if "/" in wan_name else "iface/" + wan_name_out
             promql_down = "ikuai_network_recv_kbytes_per_second{id=" + chr(34) + wan_query_id + chr(34) + "}"
@@ -1627,7 +1635,6 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(body)
             return

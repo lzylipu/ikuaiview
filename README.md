@@ -318,9 +318,14 @@ docker-compose down
 
 ## 🔐 安全
 
+- 看板服务端**只接受 GET 请求**（无 POST/PUT/DELETE），WS 不读入站 frame，**后端不可被外部写入**
 - 仅在受控局域网 / VPN / 反代后暴露 `:3000`
+- **走公网反代时**：必须前置鉴权（反代 BasicAuth / OAuth / mTLS），并加 `X-Frame-Options: DENY`、`Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'`、`X-Content-Type-Options: nosniff` 等响应头
+- 入站 query 参数经白名单净化后才参与下游 PromQL 构造（防 PromQL 注入，见 `gateway.py /api/traffic`）
+- `/api/config` 已脱敏：不返内网拓扑 / 凭据用户名 / `accept_invalid_certs` 状态
+- 服务**不发** `Access-Control-Allow-Origin: *`（同源策略默认即足够，防跨站读）
 - 使用只读爱快账号
-- **永不提交** 真实 `.env`
+- **永不提交** 真实 `.env`（已被 `.gitignore` + `.dockerignore` 排除）
 - Issue / 截图不要贴密码和内网资产明细
 
 ---
