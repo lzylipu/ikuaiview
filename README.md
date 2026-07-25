@@ -348,12 +348,18 @@ docker-compose down
 
 网关对接、数据契约与面板信息架构由本项目独立维护。
 
+
 ---
+
 ---
 
 # 🌐 English
 
-## 🚀 Official deploy template
+📖 **Full English documentation**: **[README_EN.md](./README_EN.md)**
+
+For the complete English version of this README — including architecture, deploy template, environment variables, board panels, security notes and image tags — please see **[README_EN.md](./README_EN.md)**.
+
+## 🚀 One-shot
 
 ```bash
 git clone https://github.com/lzylipu/ikuaiview.git
@@ -365,38 +371,10 @@ docker-compose up -d
 # board: http://<host>:3000
 ```
 
-### Ports
-
-| Service | Host port |
-|:--------|:----------|
-| iKuaiView board | **3000** |
-| exporter | 9191 |
-| Prometheus | 9192 |
-
-### Generic paths
-
-```text
-./prometheus/prometheus.yml
-./prometheus-data/
-./.env
-```
-
-Do **not** hardcode personal NAS paths or secrets in compose.
-
-### Images
+## 📦 Image
 
 - Docker Hub: `lzylipu/ikuaiview:latest`
 - GHCR: `ghcr.io/lzylipu/ikuaiview:latest`
-
-### Minimal `.env`
-
-```env
-IKUAI_URL=http://192.168.1.1
-IKUAI_USERNAME=api
-IKUAI_PASSWORD=change-me
-```
-
-Full Chinese section above contains the complete `docker-compose.yml` template used by this repository.
 
 ## 📄 License
 
