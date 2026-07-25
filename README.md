@@ -108,8 +108,8 @@ IKUAI_PASSWORD=change-me
 
 ```yaml
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 30s
+  evaluation_interval: 30s
 
 scrape_configs:
   - job_name: ikuai
@@ -119,6 +119,7 @@ scrape_configs:
 ```
 
 > 目标是 **Compose 服务名 + 容器端口 9090**，不是主机映射端口 9191。
+> `scrape_interval` 推荐 30s（仓库 prometheus/prometheus.yml 与 scripts/bootstrap.sh 默认值；过短会放大对爱快 API 的登录/调用频率）。
 
 ### ④ `docker-compose.yml`（官方模板）
 

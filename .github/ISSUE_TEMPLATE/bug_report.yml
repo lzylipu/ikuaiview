@@ -1,0 +1,33 @@
+name: 🐛 Bug 报告
+description: 报告 ikuaiview 使用中的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量提供完整信息便于复现。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象描述
+      description: 你看到什么？期望看到什么？
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 镜像版本
+      placeholder: lzylipu/ikuaiview:Latest / git commit / 自构建
+    validations:
+      required: true
+  - type: input
+    id: deploy
+    attributes:
+      label: 部署形态
+      placeholder: 群晖 / 自建 NAS / 裸 docker run / docker-compose
+  - type: textarea
+    id: logs
+    attributes:
+      label: 容器日志
+      description: `docker logs ikuaiview --tail 100` 输出（敏感信息请打码）
+      render: shell

@@ -108,8 +108,8 @@ IKUAI_PASSWORD=change-me
 
 ```yaml
 global:
-  scrape_interval: 15s
-  evaluation_interval: 15s
+  scrape_interval: 30s
+  evaluation_interval: 30s
 
 scrape_configs:
   - job_name: ikuai
@@ -119,6 +119,7 @@ scrape_configs:
 ```
 
 > Target is **Compose service name + container port 9090**, not the host-mapped port 9191.
+> `scrape_interval` recommends 30s (matches repo's `prometheus/prometheus.yml` and `scripts/bootstrap.sh` defaults; shorter intervals amplify iKuai API login/call frequency).
 
 ### ④ `docker-compose.yml` (official template)
 

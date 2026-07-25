@@ -1,0 +1,15 @@
+name: ✨ 特性建议
+description: 想要 ikuaiview 增加什么功能
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: 解决什么问题
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你的方案
+      description: 大致思路/参考项目/截图
