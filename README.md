@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>iKuai（爱快）只读局域网监控看板</strong><br>
+  <strong>iKuai（爱快）只读监控看板 · 局域网 / 反代公网均可部署</strong><br>
   <code>ikuai-exporter + Prometheus + Web 看板 → 一套 Compose 模板直接跑</code>
 </p>
 
@@ -30,7 +30,7 @@
 - 🧩 **网络服务** — DHCP、端口转发、四路 TCP 延迟探测
 - 📱 **在线终端表** — 名称 / IP / MAC / 速率 / 流量 / 连接数
 - 🎨 **主题** — 跟随系统 / 暗色 / 亮色
-- 🔒 **只读** — 不改路由器配置
+- 🔒 **只读** — 服务端只接受 GET、WS 不读入站 frame，不改路由器配置；可安全反代至公网
 - 🐳 **官方三件套模板** — exporter + Prometheus + 看板，复制即可部署
 
 ---
@@ -258,6 +258,8 @@ CI：`.github/workflows/docker-publish.yml`（`main` / `v*` / 手动）同时推
 | iKuaiView | 3000 | 3000 |
 | exporter | 9191 | 9090 |
 | Prometheus | 9192 | 9090 |
+
+> ⚠️ `3000` / `9191` / `9192` 建议只 bind 到内网接口或仅本机（`127.0.0.1:3000` + 反代到公网），避免直接 publish 到公网。公网入口应通过反代 + 鉴权暴露。
 
 ### 路径说明
 

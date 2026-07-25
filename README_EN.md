@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>Read-only LAN dashboard for iKuai routers</strong><br>
+  <strong>Read-only dashboard for iKuai routers · LAN or reverse-proxied public Internet</strong><br>
   <code>ikuai-exporter + Prometheus + Web board → one Compose template to run</code>
 </p>
 
@@ -30,7 +30,7 @@
 - 🧩 **Network services** — DHCP, port forwarding, 4-target TCP latency probing
 - 📱 **Online device table** — name / IP / MAC / speed / traffic / connection count
 - 🎨 **Theme** — system follow / dark / light
-- 🔒 **Read-only** — never modifies router configuration
+- 🔒 **Read-only** — server only accepts GET, WS never reads inbound frames, never modifies router configuration; safe to expose via reverse proxy to the public Internet
 - 🐳 **Official 3-service template** — exporter + Prometheus + board, copy & deploy
 
 ---
@@ -49,6 +49,8 @@ iKuai (read-only API)
 | ① `ikuai-exporter` | `jakes/ikuai-exporter:latest` | **9191** | scrape iKuai live metrics |
 | ② `ikuai-prometheus` | `prom/prometheus:latest` | **9192** | store WAN history |
 | ③ `ikuaiview` | `lzylipu/ikuaiview:latest` | **3000** | web board (replaces Grafana) |
+
+> ⚠️ Ports `3000` / `9191` / `9192` should be bound to the LAN interface or `127.0.0.1` only — do not publish them directly to the public Internet. Public ingress should go through a reverse proxy with authentication.
 
 ---
 
@@ -223,7 +225,12 @@ The pre-built `dist/` is committed, so no frontend toolchain is required on the 
 
 ## 🔒 Security notes
 
-- **Read-only** — the exporter and gateway never call any mutating iKuai endpoint
+- **Server-side is read-only by design** — only GET is accepted (no POST/PUT/DELETE); the WebSocket handler pushes `snapshot`/`update` frames and never reads inbound frames, so the backend cannot be written to from outside
+- Only expose `:3000` behind a controlled LAN / VPN / reverse proxy
+- **For public reverse-proxy deployments**: put authentication in front of the reverse proxy (BasicAuth / OAuth / mTLS) and add response headers `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; style-src 'self' 'unsafe-inline'`, `X-Content-Type-Options: nosniff`
+- Inbound query parameters are whitelisted before being interpolated into any downstream PromQL construction (prevents PromQL injection; see `gateway.py /api/traffic`)
+- `/api/config` is scrubbed — it does not leak LAN topology, the iKuai username, or the `accept_invalid_certs` flag
+- The server never sends `Access-Control-Allow-Origin: *` (same-origin policy is enough; cross-site reads are blocked)
 - Use a dedicated **read-only** iKuai account, never the admin password
 - `.env` is gitignored by default — never commit real credentials
 - All paths in compose are relative — no personal NAS paths leak into the template
