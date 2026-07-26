@@ -30,6 +30,7 @@
 - 🧩 **网络服务** — DHCP、端口转发、四路 TCP 延迟探测
 - 📱 **在线终端表** — 名称 / IP / MAC / 速率 / 流量 / 连接数
 - 🎨 **主题** — 跟随系统 / 暗色 / 亮色
+- 📐 **响应式对齐** — 移动端 cabinet 卡片网格自动对齐 baseline，数值统一 `tabular-nums` 等宽对位，桌面与移动两套断点不漂移
 - 🔒 **只读** — 服务端只接受 GET、WS 不读入站 frame，不改路由器配置；可安全反代至公网
 - 🐳 **官方三件套模板** — exporter + Prometheus + 看板，复制即可部署
 
@@ -326,6 +327,7 @@ docker-compose down
 - 入站 query 参数经白名单净化后才参与下游 PromQL 构造（防 PromQL 注入，见 `gateway.py /api/traffic`）
 - `/api/config` 已脱敏：不返内网拓扑 / 凭据用户名 / `accept_invalid_certs` 状态
 - 服务**不发** `Access-Control-Allow-Origin: *`（同源策略默认即足够，防跨站读）
+- **静态资源路径穿越防御**：所有未匹配 REST 端点的请求先做规范化 + 父目录校验（`os.path.abspath` 后强制仍在 `/app/dist/` 之下）；空字节、绝对路径、Windows 风格分隔符、敏感后缀（`.py/.db/.env/.yml/.bak` 等）一律 `403 Forbidden`，杜绝 `../` 逃逸与容器内任意文件读取
 - 使用只读爱快账号
 - **永不提交** 真实 `.env`（已被 `.gitignore` + `.dockerignore` 排除）
 - Issue / 截图不要贴密码和内网资产明细

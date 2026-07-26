@@ -30,6 +30,7 @@
 - 🧩 **Network services** — DHCP, port forwarding, 4-target TCP latency probing
 - 📱 **Online device table** — name / IP / MAC / speed / traffic / connection count
 - 🎨 **Theme** — system follow / dark / light
+- 📐 **Responsive alignment** — mobile cabinet cards use a baseline-aligned grid, numeric fields use `tabular-nums` for stable column widths, and desktop + mobile breakpoints stay drift-free
 - 🔒 **Read-only** — server only accepts GET, WS never reads inbound frames, never modifies router configuration; safe to expose via reverse proxy to the public Internet
 - 🐳 **Official 3-service template** — exporter + Prometheus + board, copy & deploy
 
@@ -231,6 +232,7 @@ The pre-built `dist/` is committed, so no frontend toolchain is required on the 
 - Inbound query parameters are whitelisted before being interpolated into any downstream PromQL construction (prevents PromQL injection; see `gateway.py /api/traffic`)
 - `/api/config` is scrubbed — it does not leak LAN topology, the iKuai username, or the `accept_invalid_certs` flag
 - The server never sends `Access-Control-Allow-Origin: *` (same-origin policy is enough; cross-site reads are blocked)
+- **Path-traversal hardening for static assets**: any request that does not match a REST endpoint is canonicalized via `os.path.abspath` and forced to stay under `/app/dist/`; null bytes, absolute paths, Windows-style separators, and sensitive suffixes (`.py/.db/.env/.yml/.bak`) are rejected with `403 Forbidden` — `../` escape attempts cannot read arbitrary container files
 - Use a dedicated **read-only** iKuai account, never the admin password
 - `.env` is gitignored by default — never commit real credentials
 - All paths in compose are relative — no personal NAS paths leak into the template
