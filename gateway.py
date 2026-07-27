@@ -761,6 +761,8 @@ def fetch_exporter_metrics():
         "devices": [],
         "interfaces": [],
         "wan_speed": {"down": 0.0, "up": 0.0},
+        "wan_total_down_bytes": 0.0,
+        "wan_total_up_bytes": 0.0,
         "lan_speed": {"down": 0.0, "up": 0.0},
         "wan_ip": "—",
         "wan_proto": "PPPOE",
@@ -842,6 +844,8 @@ def fetch_exporter_metrics():
                     ip = target_id.replace("device/", "")
                     if ip not in devices_map: devices_map[ip] = {}
                     devices_map[ip]["down_bytes"] = val
+                elif target_id == "iface/wan1":
+                    data["wan_total_down_bytes"] = val
         elif metric_part.startswith("ikuai_network_send_bytes"):
             m = re.search(r'id="([^"]+)"', metric_part)
             if m:
@@ -850,6 +854,8 @@ def fetch_exporter_metrics():
                     ip = target_id.replace("device/", "")
                     if ip not in devices_map: devices_map[ip] = {}
                     devices_map[ip]["up_bytes"] = val
+                elif target_id == "iface/wan1":
+                    data["wan_total_up_bytes"] = val
         elif metric_part.startswith("ikuai_network_conn_count"):
             m = re.search(r'id="([^"]+)"', metric_part)
             if m:
@@ -1174,6 +1180,8 @@ def make_snapshot_payload(data):
             "online": True,
             "monthly_usage_gb": float(data.get("monthly_usage_gb", 0) or 0),
             "monthly_usage_covered_seconds": int(data.get("monthly_usage_covered_seconds", 0) or 0),
+            "total_download_bytes": int(float(data.get("wan_total_down_bytes", 0) or 0)),
+            "total_upload_bytes": int(float(data.get("wan_total_up_bytes", 0) or 0)),
             "download_bps": rate_to_bps(data["wan_speed"]["down"]),
             "upload_bps": rate_to_bps(data["wan_speed"]["up"]),
             "connection_count": int(data.get("host_conns") or sum(dev.get("conns", 0) for dev in data.get("devices", []))),
