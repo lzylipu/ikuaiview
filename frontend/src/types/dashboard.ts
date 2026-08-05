@@ -58,11 +58,35 @@ export interface IspInfo {
   name: string;
   online: boolean;
   monthly_usage_gb: number;
+  monthly_usage_covered_seconds?: number;
+  total_download_bytes?: number;
+  total_upload_bytes?: number;
   download_bps: number;
   upload_bps: number;
   connection_count: number;
   wans: WanIspInfo[];
   connection_count_ipv6?: number;
+}
+
+/** gateway 附加的爱快详情（DNS / 连接分项 / 拨号 / homepage IP） */
+export interface IkuaiExtraConnections {
+  tcp?: number;
+  udp?: number;
+  icmp?: number;
+}
+
+export interface IkuaiExtra {
+  dns?: string[];
+  connections?: IkuaiExtraConnections;
+  link_check_status?: string;
+  link_check_errmsg?: string;
+  wan_dial_duration_seconds?: number;
+  wan_dial_time_str?: string;
+  wan_dial_time_ts?: number;
+  homepage_wan_ip?: string;
+  homepage_wan_isp?: string;
+  homepage_wan_month_total_bytes?: number;
+  [key: string]: unknown;
 }
 
 export interface InterfaceStatus {
@@ -148,6 +172,8 @@ export interface DashboardSnapshot {
   wans: WanEntry[];
   wans_isp: WanIspInfo[];
   wan_traffic_points: TrafficPoint[];
+  /** optional gateway extension used by Wan card (DNS/dial/conns/homepage IP) */
+  ikuai_extra?: IkuaiExtra | null;
 }
 
 // ── Differential Update ──────────────────────────────────
@@ -166,6 +192,7 @@ export interface DashboardUpdate {
   wans: WanEntry[] | null;
   wans_isp: WanIspInfo[] | null;
   wan_traffic_points: TrafficPoint[] | null;
+  ikuai_extra?: IkuaiExtra | null;
 }
 
 // ── Connection Status ────────────────────────────────────

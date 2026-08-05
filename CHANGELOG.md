@@ -1,5 +1,15 @@
 # Changelog
 
+## v037 — 2026-08-06
+
+### 数据保真（不改页面布局）
+- gateway：公网 IP / 本月用量 / 总连接 / 终端列表 **last-good**，exporter 半残或空值不再盖掉好数据
+- 总连接优先 `ikuai_extra.connections`（TCP+UDP+ICMP），其次 host_conns / 设备 conns
+- 前端 store：`ikuai_extra` 入正式类型与 dashboard store；snapshot/update **空值不覆盖**
+- dist 双入口 `index-RXv015` ≡ `index-B2SGRze5` 同步合并逻辑；孤儿 mobile 包同步兜底
+
+# Changelog
+
 ## v036 — 2026-08-05
 
 ### UI

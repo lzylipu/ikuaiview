@@ -14,6 +14,7 @@ import type {
   DashboardUpdate,
   WanEntry,
   WanIspInfo,
+  IkuaiExtra,
 } from '@/types/dashboard';
 import type { TimeRange } from '@/types/charts';
 import { timeRangeToMs } from '@/types/charts';
@@ -56,6 +57,8 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const wansIsp = ref<WanIspInfo[]>([]);
   const _wanTrafficBuffers = ref<Record<string, TrafficPoint[]>>({});
   const selectedWan = ref<string | null>(null);
+  /** gateway 附加详情：DNS / 拨号 / 连接分项 / homepage IP */
+  const ikuaiExtra = ref<IkuaiExtra | null>(null);
 
   // ── Rate Computed (sum of all WANs or single ISP fallback) ──
   const totalDownloadBps = computed(() => {
@@ -114,21 +117,131 @@ export const useDashboardStore = defineStore('dashboard', () => {
 
   // ── Actions ─────────────────────────────────────────
 
+  function isBlankIp(val: unknown): boolean {
+    const s = String(val ?? '').trim();
+    return !s || s === '—' || s === '-' || s === 'N/A' || s === 'n/a' || s === 'null' || s === 'None';
+  }
+
+  function extraConnTotal(extra: IkuaiExtra | null | undefined): number {
+    const c = extra?.connections;
+    if (!c) return 0;
+    return (Number(c.tcp) || 0) + (Number(c.udp) || 0) + (Number(c.icmp) || 0);
+  }
+
+  /** 合并 gateway：空 IP 不覆盖已有好值 */
+  function mergeGateway(next: GatewayInfo) {
+    const cur = gateway.value;
+    const wanIp = !isBlankIp(next.wan_ip) ? next.wan_ip : cur.wan_ip;
+    const gwIp = !isBlankIp(next.gateway_ip) ? next.gateway_ip : cur.gateway_ip;
+    Object.assign(cur, next, { wan_ip: wanIp, gateway_ip: gwIp });
+  }
+
+  /** 合并 isp：用量/连接数 0 不覆盖已有好值；速率照常更新 */
+  function mergeIsp(next: IspInfo) {
+    const cur = isp.value;
+    const monthly = (Number(next.monthly_usage_gb) || 0) > 0
+      ? next.monthly_usage_gb
+      : cur.monthly_usage_gb;
+    const covered = (Number(next.monthly_usage_covered_seconds) || 0) > 0
+      ? next.monthly_usage_covered_seconds
+      : cur.monthly_usage_covered_seconds;
+    let conn = Number(next.connection_count) || 0;
+    if (conn <= 0) {
+      const fromExtra = extraConnTotal(ikuaiExtra.value);
+      conn = fromExtra > 0 ? fromExtra : (Number(cur.connection_count) || 0);
+    }
+    const td = (Number(next.total_download_bytes) || 0) > 0
+      ? next.total_download_bytes
+      : cur.total_download_bytes;
+    const tu = (Number(next.total_upload_bytes) || 0) > 0
+      ? next.total_upload_bytes
+      : cur.total_upload_bytes;
+    Object.assign(cur, next, {
+      monthly_usage_gb: monthly,
+      monthly_usage_covered_seconds: covered,
+      connection_count: conn,
+      total_download_bytes: td,
+      total_upload_bytes: tu,
+    });
+  }
+
+  /** 合并 wifi/终端：空 devices 不覆盖已有列表 */
+  function mergeWifi(next: WifiInfo) {
+    const cur = wifi.value;
+    const devices = (Array.isArray(next.devices) && next.devices.length > 0)
+      ? next.devices
+      : cur.devices;
+    Object.assign(cur, next, { devices });
+  }
+
+  function mergeIkuaiExtra(next: IkuaiExtra | null | undefined) {
+    if (!next || typeof next !== 'object') return;
+    const cur = ikuaiExtra.value || {};
+    const merged: IkuaiExtra = { ...cur, ...next };
+    // dns 空数组不盖
+    if (Array.isArray(next.dns) && next.dns.length === 0 && Array.isArray(cur.dns) && cur.dns.length > 0) {
+      merged.dns = cur.dns;
+    }
+    // connections 全 0 不盖
+    const nTotal = extraConnTotal(next);
+    const cTotal = extraConnTotal(cur);
+    if (nTotal <= 0 && cTotal > 0) {
+      merged.connections = cur.connections;
+    }
+    // homepage ip 空不盖
+    if (isBlankIp(next.homepage_wan_ip) && !isBlankIp(cur.homepage_wan_ip)) {
+      merged.homepage_wan_ip = cur.homepage_wan_ip;
+    }
+    ikuaiExtra.value = merged;
+
+    // 用 extra 回填 gateway.wan_ip / isp.connection_count（不改布局，只补数）
+    if (isBlankIp(gateway.value.wan_ip) && !isBlankIp(merged.homepage_wan_ip)) {
+      gateway.value.wan_ip = String(merged.homepage_wan_ip);
+    }
+    const ec = extraConnTotal(merged);
+    if ((Number(isp.value.connection_count) || 0) <= 0 && ec > 0) {
+      isp.value.connection_count = ec;
+    }
+  }
+
+  function mergeWans(nextWans: WanEntry[]) {
+    if (!Array.isArray(nextWans) || nextWans.length === 0) {
+      // 空列表不 Cleared 已有 WAN 身份（速率旁路仍可能更新 isp）
+      if (wans.value.length > 0) return;
+      applyWans(nextWans);
+      return;
+    }
+    const prevByName = new Map(wans.value.map((w) => [w.wan_name, w]));
+    const merged = nextWans.map((w) => {
+      const prev = prevByName.get(w.wan_name);
+      if (!prev) return w;
+      return {
+        ...w,
+        wan_ip: !isBlankIp(w.wan_ip) ? w.wan_ip : prev.wan_ip,
+        gateway_ip: !isBlankIp(w.gateway_ip) ? w.gateway_ip : prev.gateway_ip,
+      };
+    });
+    applyWans(merged);
+  }
+
+
   function handleSnapshot(snapshot: DashboardSnapshot) {
     reconcileDeviceOverrides();
     system.value = snapshot.system;
-    gateway.value = snapshot.gateway;
+    // 先吃 ikuai_extra，后面 mergeGateway/Isp 才能用 homepage / 连接分项兜底
+    if (snapshot.ikuai_extra) mergeIkuaiExtra(snapshot.ikuai_extra);
+    mergeGateway(snapshot.gateway);
     interfaces.value = snapshot.interfaces;
-    isp.value = snapshot.isp;
+    mergeIsp(snapshot.isp);
     latencyProbes.value = snapshot.latency_probes;
-    // Backend sends up to 6h of history — keep full buffer, viewport derived reactively
-    _trafficBuffer.value = pruneByTimestamp(snapshot.traffic.points, '6H');
-    wifi.value = snapshot.wifi;
+    // live 裁剪跟随当前时间档（不再写死 6H）
+    _trafficBuffer.value = pruneByTimestamp(snapshot.traffic.points, trafficTimeRange.value);
+    mergeWifi(snapshot.wifi);
     stability.value = snapshot.stability;
     interfaceStatuses.value = snapshot.interface_statuses;
 
-    // Multi-WAN fields
-    applyWans(snapshot.wans || []);
+    // Multi-WAN fields（空 wan_ip 不盖）
+    mergeWans(snapshot.wans || []);
     wansIsp.value = snapshot.wans_isp || [];
 
     // Populate per-WAN traffic buffers
@@ -141,7 +254,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
           }
           newBuffers[pt.wan_name].push(pt);
           // Prune to 6h
-          newBuffers[pt.wan_name] = pruneByTimestamp(newBuffers[pt.wan_name], '6H');
+          newBuffers[pt.wan_name] = pruneByTimestamp(newBuffers[pt.wan_name], trafficTimeRange.value);
         }
       }
     }
@@ -154,27 +267,24 @@ export const useDashboardStore = defineStore('dashboard', () => {
 
   function handleUpdate(update: DashboardUpdate) {
     if (update.system) Object.assign(system.value, update.system);
-    if (update.gateway) {
-      Object.assign(gateway.value, update.gateway);
-    }
+    if (update.ikuai_extra) mergeIkuaiExtra(update.ikuai_extra);
+    if (update.gateway) mergeGateway(update.gateway);
     if (update.interfaces) Object.assign(interfaces.value, update.interfaces);
-    if (update.isp) {
-      Object.assign(isp.value, update.isp);
-    }
+    if (update.isp) mergeIsp(update.isp);
     if (update.traffic) {
       _trafficBuffer.value.push(update.traffic);
-      _trafficBuffer.value = pruneByTimestamp(_trafficBuffer.value, '6H');
+      _trafficBuffer.value = pruneByTimestamp(_trafficBuffer.value, trafficTimeRange.value);
     }
     if (update.latency_probes) latencyProbes.value = update.latency_probes;
     if (update.wifi) {
       reconcileDeviceOverrides();
-      Object.assign(wifi.value, update.wifi);
+      mergeWifi(update.wifi);
     }
     if (update.stability) Object.assign(stability.value, update.stability);
     if (update.interface_statuses) interfaceStatuses.value = update.interface_statuses;
 
-    // Multi-WAN updates
-    if (update.wans) applyWans(update.wans);
+    // Multi-WAN updates（空列表 / 空 IP 不 Cleared）
+    if (update.wans) mergeWans(update.wans);
     if (update.wans_isp) wansIsp.value = update.wans_isp;
     if (update.wan_traffic_points && update.wan_traffic_points.length > 0) {
       const newBuffers = { ..._wanTrafficBuffers.value };
@@ -184,7 +294,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
             newBuffers[pt.wan_name] = [];
           }
           newBuffers[pt.wan_name].push(pt);
-          newBuffers[pt.wan_name] = pruneByTimestamp(newBuffers[pt.wan_name], '6H');
+          newBuffers[pt.wan_name] = pruneByTimestamp(newBuffers[pt.wan_name], trafficTimeRange.value);
         }
       }
       _wanTrafficBuffers.value = newBuffers;
@@ -244,6 +354,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   return {
     // State
     system,
+    ikuaiExtra,
     gateway,
     interfaces,
     isp,

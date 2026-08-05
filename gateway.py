@@ -85,6 +85,21 @@ exporter_metrics_cache = {"parsed": None, "ts": 0, "error": None}
 exporter_cache_lock = threading.Lock()
 live_wan_rate_cache = {"down_Bps": 0.0, "up_Bps": 0.0, "ts": 0, "source": ""}
 live_wan_rate_lock = threading.Lock()
+# 身份/累计类 last-good：exporter 半残或空值时不把好数据盖成 —/0/[]
+# 只保真字段，不改前端布局
+dashboard_last_good = {
+    "wan_ip": "",
+    "gateway_ip": "",
+    "monthly_usage_gb": 0.0,
+    "monthly_usage_covered_seconds": 0,
+    "connection_count": 0,
+    "total_download_bytes": 0,
+    "total_upload_bytes": 0,
+    "devices": [],
+    "host_conns": 0,
+    "ts": 0,
+}
+dashboard_last_good_lock = threading.Lock()
 
 # 实时速率 1s 采样 → 10s 窗口取峰值写入 ring（供曲线 /api/traffic + wan_traffic_points）
 _chart_window = {"start_ms": 0, "max_down": 0, "max_up": 0}
@@ -1318,6 +1333,147 @@ def persist_device_bytes_snapshot(devices, sys_uptime):
             c.close()
 
 
+
+def _is_blank_ip(val):
+    s = str(val or "").strip()
+    return (not s) or s in ("—", "-", "N/A", "n/a", "null", "None")
+
+
+def _extra_connection_total(extra=None):
+    """总连接优先 sysstat TCP+UDP+ICMP，其次 host_conns / 设备 conns 和。"""
+    try:
+        ex = extra if isinstance(extra, dict) else (ikuai_extra_cache or {})
+        conn = ex.get("connections") or {}
+        total = int(conn.get("tcp") or 0) + int(conn.get("udp") or 0) + int(conn.get("icmp") or 0)
+        if total > 0:
+            return total
+    except Exception:
+        pass
+    return 0
+
+
+def _remember_dashboard_good(payload, raw_data=None):
+    """把本轮有效身份/累计值写入 last-good。"""
+    try:
+        gw = payload.get("gateway") or {}
+        isp = payload.get("isp") or {}
+        wifi = payload.get("wifi") or {}
+        with dashboard_last_good_lock:
+            if not _is_blank_ip(gw.get("wan_ip")):
+                dashboard_last_good["wan_ip"] = str(gw.get("wan_ip"))
+            if not _is_blank_ip(gw.get("gateway_ip")):
+                dashboard_last_good["gateway_ip"] = str(gw.get("gateway_ip"))
+            try:
+                mu = float(isp.get("monthly_usage_gb") or 0)
+                if mu > 0:
+                    dashboard_last_good["monthly_usage_gb"] = mu
+                    dashboard_last_good["monthly_usage_covered_seconds"] = int(
+                        isp.get("monthly_usage_covered_seconds") or dashboard_last_good.get("monthly_usage_covered_seconds") or 0
+                    )
+            except Exception:
+                pass
+            try:
+                cc = int(isp.get("connection_count") or 0)
+                if cc > 0:
+                    dashboard_last_good["connection_count"] = cc
+            except Exception:
+                pass
+            try:
+                td = int(isp.get("total_download_bytes") or 0)
+                tu = int(isp.get("total_upload_bytes") or 0)
+                if td > 0:
+                    dashboard_last_good["total_download_bytes"] = td
+                if tu > 0:
+                    dashboard_last_good["total_upload_bytes"] = tu
+            except Exception:
+                pass
+            devs = wifi.get("devices")
+            if isinstance(devs, list) and len(devs) > 0:
+                dashboard_last_good["devices"] = list(devs)
+            if isinstance(raw_data, dict):
+                try:
+                    hc = int(raw_data.get("host_conns") or 0)
+                    if hc > 0:
+                        dashboard_last_good["host_conns"] = hc
+                except Exception:
+                    pass
+            dashboard_last_good["ts"] = time.time()
+    except Exception as e:
+        print("[WS] remember last-good failed:", e, flush=True)
+
+
+def _apply_dashboard_last_good(payload):
+    """空值不覆盖：用 last-good 回填公网/用量/连接/终端。"""
+    try:
+        with dashboard_last_good_lock:
+            good = dict(dashboard_last_good)
+        if not good:
+            return payload
+        gw = payload.setdefault("gateway", {})
+        isp = payload.setdefault("isp", {})
+        wifi = payload.setdefault("wifi", {})
+        wans = payload.get("wans") or []
+
+        if _is_blank_ip(gw.get("wan_ip")) and good.get("wan_ip"):
+            gw["wan_ip"] = good["wan_ip"]
+        if _is_blank_ip(gw.get("gateway_ip")) and good.get("gateway_ip"):
+            gw["gateway_ip"] = good["gateway_ip"]
+
+        # nested gateway.wans + top-level wans
+        for bucket_name in ("wans",):
+            bucket = payload.get(bucket_name)
+            if isinstance(bucket, list):
+                for w in bucket:
+                    if not isinstance(w, dict):
+                        continue
+                    if _is_blank_ip(w.get("wan_ip")) and good.get("wan_ip"):
+                        w["wan_ip"] = good["wan_ip"]
+                    if _is_blank_ip(w.get("gateway_ip")) and good.get("gateway_ip"):
+                        w["gateway_ip"] = good["gateway_ip"]
+        nested = gw.get("wans")
+        if isinstance(nested, list):
+            for w in nested:
+                if not isinstance(w, dict):
+                    continue
+                if _is_blank_ip(w.get("wan_ip")) and good.get("wan_ip"):
+                    w["wan_ip"] = good["wan_ip"]
+                if _is_blank_ip(w.get("gateway_ip")) and good.get("gateway_ip"):
+                    w["gateway_ip"] = good["gateway_ip"]
+
+        try:
+            if float(isp.get("monthly_usage_gb") or 0) <= 0 and float(good.get("monthly_usage_gb") or 0) > 0:
+                isp["monthly_usage_gb"] = float(good["monthly_usage_gb"])
+                if int(isp.get("monthly_usage_covered_seconds") or 0) <= 0:
+                    isp["monthly_usage_covered_seconds"] = int(good.get("monthly_usage_covered_seconds") or 0)
+        except Exception:
+            pass
+        try:
+            if int(isp.get("connection_count") or 0) <= 0 and int(good.get("connection_count") or 0) > 0:
+                isp["connection_count"] = int(good["connection_count"])
+        except Exception:
+            pass
+        try:
+            if int(isp.get("total_download_bytes") or 0) <= 0 and int(good.get("total_download_bytes") or 0) > 0:
+                isp["total_download_bytes"] = int(good["total_download_bytes"])
+            if int(isp.get("total_upload_bytes") or 0) <= 0 and int(good.get("total_upload_bytes") or 0) > 0:
+                isp["total_upload_bytes"] = int(good["total_upload_bytes"])
+        except Exception:
+            pass
+
+        devs = wifi.get("devices")
+        if (not isinstance(devs, list) or len(devs) == 0) and good.get("devices"):
+            wifi["devices"] = list(good["devices"])
+            # 保持 connected_devices 一致
+            try:
+                payload.setdefault("interfaces", {})["connected_devices"] = len(wifi["devices"])
+                gw["ip_allocations"] = len(wifi["devices"])
+            except Exception:
+                pass
+    except Exception as e:
+        print("[WS] apply last-good failed:", e, flush=True)
+    return payload
+
+
 def make_snapshot_payload(data):
     """生成完美符合 iKuaiView DashboardSnapshot 数据结构"""
     # exporter 偶发空 metrics 时 wan_ip 会变 —；用 homepage 缓存 IP 兜底
@@ -1421,7 +1577,13 @@ def make_snapshot_payload(data):
             "total_upload_bytes": int(float(data.get("wan_total_up_bytes", 0) or 0)),
             "download_bps": rate_to_bps(data["wan_speed"]["down"]),
             "upload_bps": rate_to_bps(data["wan_speed"]["up"]),
-            "connection_count": int(data.get("host_conns") or sum(dev.get("conns", 0) for dev in data.get("devices", []))),
+            # 总连接：sysstat 三者和 > host_conns > 设备 conns 和；后面再 last-good 兜底
+            "connection_count": int(
+                _extra_connection_total()
+                or data.get("host_conns")
+                or sum(int(dev.get("conns", 0) or 0) for dev in data.get("devices", []))
+                or 0
+            ),
             "wans": [
                 {
                     "wan_name": "wan1",
@@ -1489,6 +1651,10 @@ def make_snapshot_payload(data):
             }
         ]
     }
+    # 空值不覆盖：公网/用量/连接/终端保留 last-good
+    _remember_dashboard_good(payload, data)
+    _apply_dashboard_last_good(payload)
+    _remember_dashboard_good(payload, data)
     return payload
 
 def make_update_payload(data):
