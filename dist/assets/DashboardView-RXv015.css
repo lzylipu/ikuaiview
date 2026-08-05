@@ -1218,3 +1218,76 @@
     max-height:37px!important;
   }
 }
+
+/* === v036 dns right-flush 2-line no-clip === */
+/* DNS：两行、右顶格、不压字；只动 identity-dns */
+.wan-pppoe-card .rate-box.identity-dns[data-v-c752fedc],
+.usage-dns-group .rate-box.identity-dns[data-v-c752fedc],
+.rate-box.identity-rate.identity-dns[data-v-c752fedc]{
+  overflow:visible!important;
+  justify-content:space-between!important;
+  align-items:center!important;
+}
+.wan-pppoe-card .identity-dns .rate-num.dns-list[data-v-c752fedc],
+.usage-dns-group .rate-num.dns-list[data-v-c752fedc],
+.rate-box.identity-dns .rate-num.dns-list[data-v-c752fedc],
+.wan-pppoe-card .identity-dns .dns-list[data-v-c752fedc]{
+  display:flex!important;
+  flex-direction:column!important;
+  flex-wrap:nowrap!important;
+  align-items:flex-end!important;
+  justify-content:center!important;
+  margin-left:auto!important;
+  margin-right:0!important;
+  text-align:right!important;
+  gap:1px!important;
+  line-height:1.15!important;
+  min-width:0!important;
+  max-width:100%!important;
+  overflow:visible!important;
+  white-space:normal!important;
+  font-size:.78rem!important;
+}
+.wan-pppoe-card .identity-dns .dns-tag[data-v-c752fedc],
+.usage-dns-group .rate-num.dns-list .dns-tag[data-v-c752fedc],
+.rate-box.identity-dns .dns-tag[data-v-c752fedc]{
+  display:block!important;
+  width:auto!important;
+  max-width:100%!important;
+  text-align:right!important;
+  margin-left:auto!important;
+  background:transparent!important;
+  border:0!important;
+  padding:0!important;
+  font-size:.78rem!important;
+  line-height:1.15!important;
+  white-space:nowrap!important;
+  overflow:visible!important;
+  text-overflow:clip!important;
+  font-variant-numeric:tabular-nums!important;
+}
+.wan-pppoe-card > .usage-dns-group .rate-box.identity-dns[data-v-c752fedc],
+.wan-pppoe-card .rate-box.identity-dns[data-v-c752fedc]{
+  overflow:visible!important;
+  max-height:none!important;
+}
+@media (max-width:820px){
+  .wan-pppoe-card > .usage-dns-group .rate-box.identity-dns[data-v-c752fedc],
+  .wan-pppoe-card .rate-box.identity-dns[data-v-c752fedc]{
+    overflow:visible!important;
+    max-height:none!important;
+    height:37px!important;
+    min-height:37px!important;
+  }
+  .wan-pppoe-card .identity-dns .rate-num.dns-list[data-v-c752fedc],
+  .usage-dns-group .rate-num.dns-list[data-v-c752fedc]{
+    font-size:.72rem!important;
+    gap:0!important;
+    line-height:1.1!important;
+  }
+  .wan-pppoe-card .identity-dns .dns-tag[data-v-c752fedc],
+  .usage-dns-group .rate-num.dns-list .dns-tag[data-v-c752fedc]{
+    font-size:.72rem!important;
+    line-height:1.1!important;
+  }
+}
