@@ -350,6 +350,23 @@ docker-compose down
 
 ---
 
+
+
+## 🧩 前端源码 / Frontend Source
+
+生产 Docker 镜像使用根目录预构建 `dist/` + `gateway.py`（Alpine，无需 Node）。
+
+如需二次开发或自行编译：
+
+```bash
+cd frontend
+pnpm install
+pnpm build
+# 将 frontend/dist 同步到仓库根 dist/ 后提交，或本地 docker build
+```
+
+当前看板 UI 对应测试验收版本 **v035**（WAN 行高统一、已移除无用「线路」状态块；曲线 live 窗口跟随 1H/24H）。
+
 ## 🙏 致谢
 
 - 采集：`jakes/ikuai-exporter`

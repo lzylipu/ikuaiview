@@ -25,3 +25,13 @@ venv/
 # accidental build leftovers
 dist.bad-sed/
 *.log
+
+# frontend toolchain
+frontend/node_modules/
+frontend/dist/
+**/.vite/
+*.bak*
+.DS_Store
+
+# local publish scratch
+/tmp/

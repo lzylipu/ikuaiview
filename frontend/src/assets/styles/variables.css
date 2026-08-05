@@ -1,0 +1,140 @@
+/* ═══════════════════════════════════════════════════════════════════
+   CSS Custom Properties — Dark & Light Theme Tokens
+   ═══════════════════════════════════════════════════════════════════ */
+
+:root,
+[data-theme="dark"] {
+  /* ── Surfaces ──────────────────────────────── */
+  --color-bg-primary: #0f1219;
+  --color-bg-secondary: #141820;
+  --color-bg-card: #1a1e2b;
+  --color-bg-card-hover: #1e2434;
+  --color-bg-input: #141820;
+  --color-bg-hover: #222840;
+  --color-bg-sidebar: #0c0f15;
+  --color-bg-navbar: #11151e;
+
+  /* ── Text ──────────────────────────────────── */
+  --color-text-primary: #e4e7f0;
+  --color-text-secondary: #b2b8ca;
+  --color-text-muted: #969db3;
+  --color-text-inverse: #0f1219;
+
+  /* ── Accents ───────────────────────────────── */
+  --color-accent: #4f8cff;
+  --color-accent-hover: #6ba1ff;
+  --color-accent-subtle: rgba(79, 140, 255, 0.12);
+  --color-accent-border: rgba(79, 140, 255, 0.3);
+
+  /* ── Status Colors ─────────────────────────── */
+  --color-success: #22c55e;
+  --color-success-subtle: rgba(34, 197, 94, 0.12);
+  --color-warning: #f59e0b;
+  --color-warning-subtle: rgba(245, 158, 11, 0.12);
+  --color-danger: #f66a6a;
+  --color-danger-subtle: rgba(246, 106, 106, 0.12);
+  --color-info: #3b82f6;
+  --color-info-subtle: rgba(59, 130, 246, 0.12);
+
+  /* ── Chart Colors ──────────────────────────── */
+  --color-chart-download: #4f8cff;
+  --color-chart-upload: #22c55e;
+  --color-chart-download-area: rgba(79, 140, 255, 0.15);
+  --color-chart-upload-area: rgba(34, 197, 94, 0.15);
+
+  /* ── Borders ───────────────────────────────── */
+  --color-border: #363b50;
+  --color-border-light: #262b3a;
+  --color-border-accent: rgba(79, 140, 255, 0.4);
+
+  /* ── Shadows ───────────────────────────────── */
+  --shadow-card: none;
+  --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-navbar: none;
+  --shadow-sidebar: none;
+
+  /* ── Scrollbar ─────────────────────────────── */
+  --color-scrollbar-track: transparent;
+  --color-scrollbar-thumb: #2a2e3f;
+  --color-scrollbar-thumb-hover: #3a3f55;
+}
+
+[data-theme="light"] {
+  /* ── Surfaces ──────────────────────────────── */
+  --color-bg-primary: #ffffff;
+  --color-bg-secondary: #fafafa;
+  --color-bg-card: #ffffff;
+  --color-bg-card-hover: #f9fafb;
+  --color-bg-input: #f4f5f9;
+  --color-bg-hover: #f4f5f9;
+  --color-bg-sidebar: #ffffff;
+  --color-bg-navbar: #ffffff;
+
+  /* ── Text ──────────────────────────────────── */
+  --color-text-primary: #1a1f36;
+  --color-text-secondary: #4f566f;
+  --color-text-muted: #5f6b80;
+  --color-text-inverse: #ffffff;
+
+  /* ── Accents ───────────────────────────────── */
+  --color-accent: #1d4ed8;
+  --color-accent-hover: #1e40af;
+  --color-accent-subtle: rgba(29, 78, 216, 0.08);
+  --color-accent-border: rgba(29, 78, 216, 0.25);
+
+  /* ── Status Colors ─────────────────────────── */
+  --color-success: #15803d;
+  --color-success-subtle: rgba(21, 128, 61, 0.08);
+  --color-warning: #9a5b00;
+  --color-warning-subtle: rgba(154, 91, 0, 0.08);
+  --color-danger: #b91c1c;
+  --color-danger-subtle: rgba(185, 28, 28, 0.08);
+  --color-info: #1d4ed8;
+  --color-info-subtle: rgba(29, 78, 216, 0.08);
+
+  /* ── Chart Colors ──────────────────────────── */
+  --color-chart-download: #2563eb;
+  --color-chart-upload: #16a34a;
+  --color-chart-download-area: rgba(37, 99, 235, 0.12);
+  --color-chart-upload-area: rgba(22, 163, 74, 0.12);
+
+  /* ── Borders ───────────────────────────────── */
+  --color-border: #d4d4d8;
+  --color-border-light: #e5e7eb;
+  --color-border-accent: rgba(37, 99, 235, 0.3);
+
+  /* ── Shadows ───────────────────────────────── */
+  --shadow-card: none;
+  --shadow-elevated: 0 8px 24px rgba(0, 0, 0, 0.08);
+  --shadow-navbar: none;
+  --shadow-sidebar: none;
+
+  /* ── Scrollbar ─────────────────────────────── */
+  --color-scrollbar-track: transparent;
+  --color-scrollbar-thumb: #d1d5db;
+  --color-scrollbar-thumb-hover: #9ca3af;
+}
+
+/* ── Layout Constants (same for both themes) ──── */
+:root {
+  --sidebar-width: 60px;
+  --navbar-height: 56px;
+  --bottom-bar-height: 56px;
+  --left-col-ratio: 0.30;
+  --right-col-ratio: 0.70;
+  --content-gap: 8px;
+  --card-padding: 20px;
+  --card-radius: 8px;
+  --border-radius-sm: 6px;
+  --border-radius-md: 8px;
+  --border-radius-lg: 12px;
+
+  /* ── Typography ────────────────────────────── */
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+  --font-sans: 'MiSans', 'MiSansLatin', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  /* ── Transitions ───────────────────────────── */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+}

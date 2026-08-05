@@ -73,15 +73,93 @@ METADATA_POLL_SECONDS = int(os.environ.get("IKUAIVIEW_METADATA_POLL_SECONDS", "3
 # 看板 WS 推送间隔（秒）。jakes/ikuai-exporter 是“拉 /metrics 时实时回源爱快”，
 # 若不缓存，会表现为后台 api 每 N 秒登录/调用。
 WS_PUSH_SECONDS = float(os.environ.get("IKUAIVIEW_WS_PUSH_SECONDS", "5"))
+WS_PUSH_SECONDS = min(30.0, max(1.0, WS_PUSH_SECONDS))
 # exporter /metrics 本地缓存，把多客户端/高频 WS 合并为低频回源
 EXPORTER_CACHE_TTL = float(os.environ.get("IKUAIVIEW_EXPORTER_CACHE_TTL", "5"))
+EXPORTER_CACHE_TTL = min(30.0, max(1.0, EXPORTER_CACHE_TTL))
+# 强制实时链路 ≤1s：环境变量若仍是 2/5 会盖掉默认值，导致 chart-rates/终端不刷新
+# 曲线图：每 N 秒一个点，窗口内取最高值；1 小时 ≈ 360 点
+CHART_BUCKET_SECONDS = int(os.environ.get("IKUAIVIEW_CHART_BUCKET_SECONDS", "10"))
+CHART_RING_MAXLEN = int(os.environ.get("IKUAIVIEW_CHART_RING_MAXLEN", "8640"))  # 24h@10s
 exporter_metrics_cache = {"parsed": None, "ts": 0, "error": None}
 exporter_cache_lock = threading.Lock()
+live_wan_rate_cache = {"down_Bps": 0.0, "up_Bps": 0.0, "ts": 0, "source": ""}
+live_wan_rate_lock = threading.Lock()
+
+# 实时速率 1s 采样 → 10s 窗口取峰值写入 ring（供曲线 /api/traffic + wan_traffic_points）
+_chart_window = {"start_ms": 0, "max_down": 0, "max_up": 0}
+_chart_ring = []  # [(ts_ms, down_bps, up_bps), ...]
+_chart_lock = threading.Lock()
+
+
+def _chart_note_sample(down_bps, up_bps, now_ms=None):
+    """1s 采样记入当前 10s 窗口；窗口结束时落一个峰值点到 ring。"""
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    bucket_ms = max(1, CHART_BUCKET_SECONDS) * 1000
+    with _chart_lock:
+        if not _chart_window["start_ms"]:
+            _chart_window["start_ms"] = now_ms
+            _chart_window["max_down"] = int(down_bps or 0)
+            _chart_window["max_up"] = int(up_bps or 0)
+            return None
+        # 仍在同一窗口
+        if now_ms - int(_chart_window["start_ms"]) < bucket_ms:
+            if int(down_bps or 0) > int(_chart_window["max_down"]):
+                _chart_window["max_down"] = int(down_bps or 0)
+            if int(up_bps or 0) > int(_chart_window["max_up"]):
+                _chart_window["max_up"] = int(up_bps or 0)
+            return None
+        # 窗口结束：落点（时间戳用窗口结束时刻）
+        point = (
+            int(_chart_window["start_ms"]) + bucket_ms,
+            int(_chart_window["max_down"]),
+            int(_chart_window["max_up"]),
+        )
+        _chart_ring.append(point)
+        if len(_chart_ring) > CHART_RING_MAXLEN:
+            del _chart_ring[: len(_chart_ring) - CHART_RING_MAXLEN]
+        # 开启新窗口（当前样本作为新窗口首值）
+        _chart_window["start_ms"] = now_ms
+        _chart_window["max_down"] = int(down_bps or 0)
+        _chart_window["max_up"] = int(up_bps or 0)
+        return point
+
+
+def _chart_ring_points(start_ms: int, end_ms: int, wan_name_out: str = "wan1"):
+    with _chart_lock:
+        snap = list(_chart_ring)
+    out = []
+    for ts_ms, dl, ul in snap:
+        if start_ms <= ts_ms <= end_ms:
+            out.append({
+                "timestamp_ms": int(ts_ms),
+                "download_bps": int(dl),
+                "upload_bps": int(ul),
+                "wan_name": wan_name_out,
+            })
+    return out
 
 
 # ── 时区：爱快 pppoe_updatetime 是 Unix 时戳（UTC 秒），但拨号时间应按北京时间显示。
 #    容器层 TZ=Asia/Shanghai 是首选；代码层兜底，避免再被 UTC 容器带回 8h 误差。
 CN_TZ = timezone(timedelta(hours=8))
+
+def _fmt_duration_cn(seconds: int) -> str:
+    """将秒数格式化为中文时长：<24h 显示 'X小时Y分'；≥24h 显示 'X天Y小时'。"""
+    try:
+        sec = int(seconds or 0)
+        if sec < 0:
+            sec = 0
+        if sec < 86400:
+            h = sec // 3600
+            m = (sec % 3600) // 60
+            return f"{h}小时{m}分"
+        d = sec // 86400
+        h = (sec % 86400) // 3600
+        return f"{d}天{h}小时"
+    except Exception:
+        return "—"
 
 def _fmt_cn_time(ts):
     """返回北京时间字符串，不依赖容器 TZ。"""
@@ -313,11 +391,12 @@ def fetch_monthly_usage_gb():
     return gb, 31 * 86400
 
 def rate_to_bps(val):
-    """exporter 的 *_kbytes_per_second 实际更接近 B/s 量级的瞬时值。
-    与当前 live UI 一致：直接当 bps 使用（前端 /1e6 显示 Mbps）。
+    """exporter 指标名是 *_kbytes_per_second，实测数值是 B/s（字节/秒）。
+    前端 format 按 bit/s（/1e3=Kbps, /1e6=Mbps），所以这里 *8 转 bps。
+    例：100000 B/s → 800000 bps → UI 约 800 Kbps / 0.8 Mbps，对应爱快 ~100 KB/s。
     """
     try:
-        return max(0, int(float(val)))
+        return max(0, int(float(val) * 8))
     except Exception:
         return 0
 
@@ -658,6 +737,17 @@ def _fetch_ikuai_metadata_locked():
             row for row in stat_rows if str(row.get("interface") or "") == "wan1"
         ]
         extra["iface_stream"] = res.get("iface_stream", []) if isinstance(res, dict) else []
+        try:
+            for row in (extra.get("iface_stream") or []):
+                if str(row.get("interface") or "") == "wan1":
+                    with live_wan_rate_lock:
+                        live_wan_rate_cache["down_Bps"] = float(row.get("download") or 0)
+                        live_wan_rate_cache["up_Bps"] = float(row.get("upload") or 0)
+                        live_wan_rate_cache["ts"] = time.time()
+                        live_wan_rate_cache["source"] = "iface_stream"
+                    break
+        except Exception as _e:
+            print("[Poller] live wan stream parse failed:", _e, flush=True)
     except Exception as e:
         print("[Poller] iKuai monthly accounting failed:", e, flush=True)
 
@@ -668,6 +758,24 @@ def _fetch_ikuai_metadata_locked():
         extra["homepage_wan_month_total_bytes"] = int(homepage_usage_cache.get("total_bytes") or 0)
         extra["homepage_wan_isp"] = homepage_usage_cache.get("isp") or ""
         extra["homepage_wan_ip"] = homepage_usage_cache.get("ip") or ""
+        # 缓存命中时保留上次拨号/DNS/端口转发/连接数（本轮 extra 是空壳）
+        try:
+            prev = globals().get("ikuai_extra_cache") or {}
+            if not extra.get("wan_dial_time_ts") and prev.get("wan_dial_time_ts"):
+                extra["wan_dial_duration_seconds"] = prev.get("wan_dial_duration_seconds") or 0
+                extra["wan_dial_time_str"] = prev.get("wan_dial_time_str") or "—"
+                extra["wan_dial_time_ts"] = prev.get("wan_dial_time_ts")
+            if not extra.get("dns") and prev.get("dns"):
+                extra["dns"] = list(prev.get("dns") or [])
+            if (not extra.get("port_forwards")) and prev.get("port_forwards"):
+                extra["port_forwards"] = list(prev.get("port_forwards") or [])
+            if extra.get("dhcp", {}).get("pool") in (None, "", "—") and (prev.get("dhcp") or {}).get("pool") not in (None, "", "—"):
+                extra["dhcp"] = dict(prev.get("dhcp") or extra.get("dhcp") or {})
+            for _k in ("tcp", "udp", "icmp"):
+                if not extra.get("connections", {}).get(_k) and (prev.get("connections") or {}).get(_k):
+                    extra.setdefault("connections", {})[_k] = prev["connections"][_k]
+        except Exception:
+            pass
     else:
         try:
             home = _call("homepage", {"TYPE": "all"})
@@ -710,6 +818,12 @@ def _fetch_ikuai_metadata_locked():
             extra["homepage_wan_isp"] = homepage_usage_cache.get("isp") or ""
             extra["homepage_wan_ip"] = homepage_usage_cache.get("ip") or ""
 
+    # DNS 兜底：WAN DNS 空时用 DHCP DNS
+    try:
+        if not extra.get("dns"):
+            extra["dns"] = list((extra.get("dhcp") or {}).get("dns") or [])
+    except Exception:
+        pass
     with extra_cache_lock:
         global ikuai_extra_cache
         ikuai_extra_cache = extra
@@ -725,8 +839,94 @@ def ikuai_metadata_poller():
         time.sleep(max(15, METADATA_POLL_SECONDS))
 
 # 启动 poller 线程
+
+def _ikuai_call_shared(func_name: str, param=None):
+    """模块级爱快调用：复用 ikuai_session，供 stream poller 使用。"""
+    if not IKUAI_PASS:
+        return None
+    now = time.time()
+    with session_lock:
+        sess_key = ikuai_session.get("sess_key")
+        if not sess_key or now - float(ikuai_session.get("ts") or 0) > SESSION_TTL:
+            passwd_md5 = hashlib.md5(IKUAI_PASS.encode("utf-8")).hexdigest()
+            login_payload = {"username": IKUAI_USER, "passwd": passwd_md5}
+            req = urllib.request.Request(
+                f"{IKUAI_URL}/Action/login",
+                data=json.dumps(login_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as res:
+                cookies = res.info().get_all("Set-Cookie", []) or []
+                sess_key = None
+                for c in cookies:
+                    for p in c.split(";"):
+                        p = p.strip()
+                        if p.startswith("sess_key="):
+                            sess_key = p.split("=", 1)[1]
+            if not sess_key:
+                return None
+            ikuai_session["sess_key"] = sess_key
+            ikuai_session["ts"] = now
+        else:
+            sess_key = ikuai_session.get("sess_key")
+    payload = {
+        "action": "show",
+        "func_name": func_name,
+        "param": param or {"TYPE": "data,total", "limit": "0,1000"},
+    }
+    req = urllib.request.Request(
+        f"{IKUAI_URL}/Action/call",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Cookie": f"sess_key={sess_key}",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=8) as res:
+        body = json.loads(res.read().decode("utf-8"))
+    return body.get("results") or {}
+
+
+def _refresh_live_wan_from_ikuai():
+    try:
+        res = _ikuai_call_shared("monitor_iface", {"TYPE": "iface_stream"})
+        if not isinstance(res, dict):
+            return
+        if "iface_stream" not in res and isinstance(res.get("results"), dict):
+            res = res.get("results") or {}
+        rows = res.get("iface_stream") or []
+        for row in rows:
+            if str(row.get("interface") or "") == "wan1":
+                with live_wan_rate_lock:
+                    live_wan_rate_cache["down_Bps"] = float(row.get("download") or 0)
+                    live_wan_rate_cache["up_Bps"] = float(row.get("upload") or 0)
+                    live_wan_rate_cache["ts"] = time.time()
+                    live_wan_rate_cache["source"] = "iface_stream_fast"
+                with extra_cache_lock:
+                    try:
+                        ikuai_extra_cache["iface_stream"] = rows
+                    except Exception:
+                        pass
+                break
+    except Exception as e:
+        print("[Poller] stream-only refresh failed:", e, flush=True)
+
+
+def ikuai_stream_poller():
+    while True:
+        try:
+            _refresh_live_wan_from_ikuai()
+        except Exception as e:
+            print("[Poller] stream poller error:", e, flush=True)
+        time.sleep(2)
+
+
 poller_thread = threading.Thread(target=ikuai_metadata_poller, daemon=True)
 poller_thread.start()
+stream_thread = threading.Thread(target=ikuai_stream_poller, daemon=True)
+stream_thread.start()
+
 
 def fetch_exporter_metrics():
     """拉取 exporter 指标；带本地 TTL 缓存，避免看板高频轮询触发爱快登录风暴。"""
@@ -958,6 +1158,17 @@ def fetch_exporter_metrics():
             pass
     except Exception:
         pass
+    # apply live_wan_rate_cache overlay（优先爱快 iface_stream，与后台一致）
+    try:
+        with live_wan_rate_lock:
+            lw = dict(live_wan_rate_cache)
+        if lw.get("ts") and time.time() - float(lw.get("ts") or 0) < 5.0:
+            data.setdefault("wan_speed", {})
+            data["wan_speed"]["down"] = float(lw.get("down_Bps") or 0)
+            data["wan_speed"]["up"] = float(lw.get("up_Bps") or 0)
+            data["wan_speed_source"] = lw.get("source") or "iface_stream"
+    except Exception:
+        pass
     with exporter_cache_lock:
         exporter_metrics_cache["parsed"] = dict(data)
         exporter_metrics_cache["ts"] = time.time()
@@ -1109,7 +1320,33 @@ def persist_device_bytes_snapshot(devices, sys_uptime):
 
 def make_snapshot_payload(data):
     """生成完美符合 iKuaiView DashboardSnapshot 数据结构"""
+    # exporter 偶发空 metrics 时 wan_ip 会变 —；用 homepage 缓存 IP 兜底
+    try:
+        _hip = (ikuai_extra_cache or {}).get("homepage_wan_ip") or ""
+        if (not data.get("wan_ip") or data.get("wan_ip") in ("—", "-", "")) and _hip:
+            data["wan_ip"] = _hip
+    except Exception:
+        pass
+    # live overlay in snapshot
+    try:
+        with live_wan_rate_lock:
+            lw = dict(live_wan_rate_cache)
+        if lw.get("ts") and time.time() - float(lw.get("ts") or 0) < 5.0:
+            data.setdefault("wan_speed", {"down": 0.0, "up": 0.0})
+            data["wan_speed"]["down"] = float(lw.get("down_Bps") or data.get("wan_speed", {}).get("down") or 0)
+            data["wan_speed"]["up"] = float(lw.get("up_Bps") or data.get("wan_speed", {}).get("up") or 0)
+    except Exception:
+        pass
     ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    # 首次 snapshot 也记入 10s 峰值窗口，避免只靠 update 才开始累计
+    try:
+        _chart_note_sample(
+            rate_to_bps(data["wan_speed"]["down"]),
+            rate_to_bps(data["wan_speed"]["up"]),
+            int(time.time() * 1000),
+        )
+    except Exception:
+        pass
 
     devices = []
     _raw_devices = persist_device_bytes_snapshot(data.get("devices", []), int(data.get("uptime", 0) or 0))
@@ -1141,7 +1378,7 @@ def make_snapshot_payload(data):
             # exporter exposes version but no appliance model; never fabricate one.
             "model": data.get("model") or "",
             "version": data.get("version", "Unknown"),
-            "uptime": f"{data.get('uptime', 0) // 3600}小时",
+            "uptime": _fmt_duration_cn(data.get('uptime', 0)),
             "uptime_seconds": data.get("uptime", 0),
             "cpu_load": round(data.get("cpu_usage", 0.0) * 100, 1),
             "free_memory": int(data.get("mem_total_bytes", 0) - data.get("mem_used_bytes", 0)),
@@ -1200,7 +1437,8 @@ def make_snapshot_payload(data):
                 {
                     "timestamp": ts,
                     "download_bps": rate_to_bps(data["wan_speed"]["down"]),
-                    "upload_bps": rate_to_bps(data["wan_speed"]["up"])
+                    "upload_bps": rate_to_bps(data["wan_speed"]["up"]),
+                    "wan_name": "wan1"
                 }
             ]
         },
@@ -1255,17 +1493,19 @@ def make_snapshot_payload(data):
 
 def make_update_payload(data):
     ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    now_ms = int(time.time() * 1000)
+    down_bps = rate_to_bps(data["wan_speed"]["down"])
+    up_bps = rate_to_bps(data["wan_speed"]["up"])
+    # 1s 实时数值照常推；曲线点仅在 10s 窗口结束时带峰值
+    peak = _chart_note_sample(down_bps, up_bps, now_ms)
     snap = make_snapshot_payload(data)
-    return {
+    # 注意：不要每秒 push traffic 点，否则曲线会变成 1s 粒度。
+    # 实时数字走 isp/wans；曲线只在 10s 峰值窗口结束时附加 traffic + wan_traffic_points。
+    out = {
         "system": snap["system"],
         "gateway": snap["gateway"],
         "interfaces": snap["interfaces"],
         "isp": snap["isp"],
-        "traffic": {
-            "timestamp": ts,
-            "download_bps": rate_to_bps(data["wan_speed"]["down"]),
-            "upload_bps": rate_to_bps(data["wan_speed"]["up"])
-        },
         "latency_probes": snap["latency_probes"],
         "wifi": snap["wifi"],
         "stability": snap["stability"],
@@ -1274,15 +1514,22 @@ def make_update_payload(data):
         "wans": snap["wans"],
         "wans_isp": snap["wans_isp"],
         "ikuai_extra": snap.get("ikuai_extra") or ikuai_extra_cache,
-        "wan_traffic_points": [
-            {
-                "timestamp": ts,
-                "download_bps": rate_to_bps(data["wan_speed"]["down"]),
-                "upload_bps": rate_to_bps(data["wan_speed"]["up"]),
-                "wan_name": "wan1"
-            }
-        ]
+        "wan_traffic_points": [],
     }
+    if peak is not None:
+        peak_ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(peak[0] / 1000.0))
+        out["traffic"] = {
+            "timestamp": peak_ts,
+            "download_bps": int(peak[1]),
+            "upload_bps": int(peak[2]),
+        }
+        out["wan_traffic_points"] = [{
+            "timestamp": peak_ts,
+            "download_bps": int(peak[1]),
+            "upload_bps": int(peak[2]),
+            "wan_name": "wan1",
+        }]
+    return out
 
 class WebHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -1325,9 +1572,9 @@ class WebHandler(BaseHTTPRequestHandler):
             if "error" not in metrics:
                 send_frame("snapshot", make_snapshot_payload(metrics))
 
-            # 2. 循环推送 update（默认 5s；配合 exporter 缓存，避免 2s 回源爱快）
+            # 2. 循环推送 update：默认 1s（实时 rx/tx、chart-rates、终端表）
             while True:
-                time.sleep(max(2.0, WS_PUSH_SECONDS))
+                time.sleep(max(0.5, float(WS_PUSH_SECONDS)))
                 metrics = fetch_exporter_metrics()
                 if "error" not in metrics:
                     send_frame("update", make_update_payload(metrics))
@@ -1394,7 +1641,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 "password_set": bool(IKUAI_PASS),
                 "router_configured": bool(IKUAI_URL),
                 "accept_invalid_certs": False,
-                "poll_interval_secs": int(max(2.0, WS_PUSH_SECONDS)),
+                "poll_interval_secs": int(max(1.0, float(WS_PUSH_SECONDS))),
                 "probe_interval_secs": 60,
                 "db_raw_retention_days": 1,
                 "db_total_retention_days": 30,
@@ -1490,7 +1737,8 @@ class WebHandler(BaseHTTPRequestHandler):
             if start_ms == 0:
                 start_ms = end_ms - 3600 * 1000
             duration_s = max(1, (end_ms - start_ms) // 1000)
-            step = max(5, duration_s // 120)
+            # 曲线策略：固定 10s 一个点（1h≈360点，24h≈8640点），窗口内取最高值
+            step = max(1, int(CHART_BUCKET_SECONDS))
             start_s = start_ms // 1000
             end_s = end_ms // 1000
             # 安全：wan_name 严格白名单，杜绝向 Prometheus 注入任意 PromQL
@@ -1501,38 +1749,75 @@ class WebHandler(BaseHTTPRequestHandler):
             wan_name = wan_name_raw
             wan_name_out = "wan1" if (not wan_name or wan_name == "*") else wan_name
             wan_query_id = wan_name if "/" in wan_name else "iface/" + wan_name_out
-            promql_down = "ikuai_network_recv_kbytes_per_second{id=" + chr(34) + wan_query_id + chr(34) + "}"
-            promql_up = "ikuai_network_send_kbytes_per_second{id=" + chr(34) + wan_query_id + chr(34) + "}"
-            AMP = chr(38)
-            url_down = PROMETHEUS_URL + "/api/v1/query_range?query=" + urllib.parse.quote(promql_down) + AMP + "start=" + str(start_s) + AMP + "end=" + str(end_s) + AMP + "step=" + str(step)
-            url_up = PROMETHEUS_URL + "/api/v1/query_range?query=" + urllib.parse.quote(promql_up) + AMP + "start=" + str(start_s) + AMP + "end=" + str(end_s) + AMP + "step=" + str(step)
-            points = []
-            try:
-                req = urllib.request.Request(url_down, headers={"User-Agent": "iKuai-Monitor-Gateway"})
-                with urllib.request.urlopen(req, timeout=4) as res:
-                    res_down = json.loads(res.read().decode("utf-8"))
-                req = urllib.request.Request(url_up, headers={"User-Agent": "iKuai-Monitor-Gateway"})
-                with urllib.request.urlopen(req, timeout=4) as res:
-                    res_up = json.loads(res.read().decode("utf-8"))
-                down_map = {}
-                if res_down.get("status") == "success":
-                    r0 = res_down.get("data", {}).get("result", [])
-                    if r0:
-                        for item in r0[0].get("values", []):
-                            down_map[int(item[0])] = rate_to_bps(item[1])
-                up_vals = []
-                if res_up.get("status") == "success":
-                    r1 = res_up.get("data", {}).get("result", [])
-                    if r1:
-                        up_vals = r1[0].get("values", [])
-                for item in up_vals:
-                    ts_s = int(item[0])
-                    ts_ms = ts_s * 1000
-                    dl = down_map.get(ts_s, 0.0)
-                    ul = rate_to_bps(item[1])
-                    points.append({"timestamp_ms": ts_ms, "download_bps": int(dl), "upload_bps": int(ul), "wan_name": wan_name_out})
-            except Exception as e:
-                print("Failed query traffic range:", e, flush=True)
+            # ring = 近端细粒度；Prometheus = 历史回填。
+            # 旧逻辑：ring 点数够就跳过 Prom → 1H/24H 都只剩同一段 ring（看起来一样）。
+            # 新逻辑：始终拉 Prom 覆盖请求窗口，再与 ring 按 timestamp 合并（ring 优先）。
+            points = _chart_ring_points(start_ms, end_ms, wan_name_out)
+            if True:  # always attempt prom history fill
+                promql_down = "ikuai_network_recv_kbytes_per_second{id=" + chr(34) + wan_query_id + chr(34) + "}"
+                promql_up = "ikuai_network_send_kbytes_per_second{id=" + chr(34) + wan_query_id + chr(34) + "}"
+                AMP = chr(38)
+                # 自适应步长：控制返回点数 ~800-2000，避免 24h@1s 超时
+                # 1h → ~10s，6h → ~30s，24h → ~60s
+                raw_step = max(int(step), int(duration_s // 1200) or 1)
+                if duration_s <= 3600:
+                    raw_step = max(1, int(step))  # 1h 用 bucket 粒度
+                elif duration_s <= 6 * 3600:
+                    raw_step = max(int(step), 30)
+                else:
+                    raw_step = max(int(step), 60)
+                url_down = PROMETHEUS_URL + "/api/v1/query_range?query=" + urllib.parse.quote(promql_down) + AMP + "start=" + str(start_s) + AMP + "end=" + str(end_s) + AMP + "step=" + str(raw_step)
+                url_up = PROMETHEUS_URL + "/api/v1/query_range?query=" + urllib.parse.quote(promql_up) + AMP + "start=" + str(start_s) + AMP + "end=" + str(end_s) + AMP + "step=" + str(raw_step)
+                try:
+                    req = urllib.request.Request(url_down, headers={"User-Agent": "iKuai-Monitor-Gateway"})
+                    with urllib.request.urlopen(req, timeout=12) as res:
+                        res_down = json.loads(res.read().decode("utf-8"))
+                    req = urllib.request.Request(url_up, headers={"User-Agent": "iKuai-Monitor-Gateway"})
+                    with urllib.request.urlopen(req, timeout=12) as res:
+                        res_up = json.loads(res.read().decode("utf-8"))
+                    down_map = {}
+                    if res_down.get("status") == "success":
+                        r0 = res_down.get("data", {}).get("result", [])
+                        if r0:
+                            for item in r0[0].get("values", []):
+                                down_map[int(item[0])] = rate_to_bps(item[1])
+                    up_vals = []
+                    if res_up.get("status") == "success":
+                        r1 = res_up.get("data", {}).get("result", [])
+                        if r1:
+                            up_vals = r1[0].get("values", [])
+                    # 按 10s bucket 取最高值
+                    buckets = {}
+                    for item in up_vals:
+                        ts_s = int(item[0])
+                        bucket = (ts_s // step) * step
+                        dl = int(down_map.get(ts_s, 0.0) or 0)
+                        ul = int(rate_to_bps(item[1]) or 0)
+                        prev = buckets.get(bucket)
+                        if not prev:
+                            buckets[bucket] = [dl, ul]
+                        else:
+                            if dl > prev[0]:
+                                prev[0] = dl
+                            if ul > prev[1]:
+                                prev[1] = ul
+                    prom_points = []
+                    for bucket in sorted(buckets.keys()):
+                        dl, ul = buckets[bucket]
+                        prom_points.append({
+                            "timestamp_ms": int(bucket) * 1000,
+                            "download_bps": int(dl),
+                            "upload_bps": int(ul),
+                            "wan_name": wan_name_out,
+                        })
+                    # ring 有则合并（ring 优先覆盖同 timestamp）
+                    if prom_points:
+                        by_ts = {p["timestamp_ms"]: p for p in prom_points}
+                        for p in points:
+                            by_ts[p["timestamp_ms"]] = p
+                        points = [by_ts[k] for k in sorted(by_ts.keys()) if start_ms <= k <= end_ms]
+                except Exception as e:
+                    print("Failed query traffic range:", e, flush=True)
             if not points:
                 points.append({"timestamp_ms": start_ms, "download_bps": 0, "upload_bps": 0, "wan_name": wan_name_out})
             # enrich points with canonical optional fields expected by frontend
@@ -1569,7 +1854,36 @@ class WebHandler(BaseHTTPRequestHandler):
                     "complete": True,
                     "wan_name": p.get("wan_name", wan_name_out),
                 })
-            covered_ms = max(0, end_ms - start_ms)
+            # coverage: 按真实有点跨度 vs 请求窗口计算（不再写死 1.0）
+            # 采集频率仍保持 1s（WS/CACHE 强制 ≤1）；此处只修元数据诚实度
+            requested_ms = max(0, int(end_ms) - int(start_ms))
+            point_ts = [int(p.get("timestamp_ms") or 0) for p in enriched if p.get("timestamp_ms") is not None]
+            point_ts = [t for t in point_ts if t > 0]
+            if len(point_ts) >= 2:
+                first_ts = min(point_ts)
+                last_ts = max(point_ts)
+                covered_ms = max(0, last_ts - first_ts)
+            elif len(point_ts) == 1:
+                first_ts = last_ts = point_ts[0]
+                covered_ms = 0
+            else:
+                first_ts = int(start_ms)
+                last_ts = int(end_ms)
+                covered_ms = 0
+            # gap 粗算：以点间距中位数为准（24h step~60s 时不能用 10s bucket*3）
+            gap_count = 0
+            if len(point_ts) >= 2:
+                ordered = sorted(point_ts)
+                deltas = [ordered[i] - ordered[i - 1] for i in range(1, len(ordered))]
+                deltas.sort()
+                med = deltas[len(deltas) // 2] if deltas else int(bucket_ms)
+                lim = max(int(bucket_ms) * 3, int(med * 2.5), 15000)
+                for i in range(1, len(ordered)):
+                    if ordered[i] - ordered[i - 1] > lim:
+                        gap_count += 1
+            completeness = 0.0 if requested_ms <= 0 else max(0.0, min(1.0, float(covered_ms) / float(requested_ms)))
+            coverage_ratio = completeness
+            is_complete = completeness >= 0.95 and gap_count == 0
             response = {
                 "schema_version": 4,
                 "router": {
@@ -1577,8 +1891,8 @@ class WebHandler(BaseHTTPRequestHandler):
                     "hardware_identity": "ikuai-host",
                     "fallback_target": "wan1",
                     "identity_source": "static",
-                    "first_seen_at_ms": start_ms,
-                    "last_seen_at_ms": end_ms,
+                    "first_seen_at_ms": first_ts,
+                    "last_seen_at_ms": last_ts,
                 },
                 "interface": {
                     "id": "wan1",
@@ -1586,8 +1900,8 @@ class WebHandler(BaseHTTPRequestHandler):
                     "kind": "wan",
                     "hardware_id": "wan1",
                     "aggregate": False,
-                    "first_seen_at_ms": start_ms,
-                    "last_seen_at_ms": end_ms,
+                    "first_seen_at_ms": first_ts,
+                    "last_seen_at_ms": last_ts,
                 },
                 "wan_interfaces": [{
                     "id": "wan1",
@@ -1595,8 +1909,8 @@ class WebHandler(BaseHTTPRequestHandler):
                     "kind": "wan",
                     "hardware_id": "wan1",
                     "aggregate": False,
-                    "first_seen_at_ms": start_ms,
-                    "last_seen_at_ms": end_ms,
+                    "first_seen_at_ms": first_ts,
+                    "last_seen_at_ms": last_ts,
                 }],
                 "points": enriched,
                 "interval_secs": step,
@@ -1610,16 +1924,16 @@ class WebHandler(BaseHTTPRequestHandler):
                     "estimated_download_bytes": "0",
                     "estimated_upload_bytes": "0",
                     "estimated": False,
-                    "complete": True,
-                    "coverage_ratio": 1.0,
+                    "complete": bool(is_complete),
+                    "coverage_ratio": float(coverage_ratio),
                 },
                 "coverage": {
-                    "requested_duration_ms": covered_ms,
-                    "exact_duration_ms": covered_ms,
+                    "requested_duration_ms": int(requested_ms),
+                    "exact_duration_ms": int(covered_ms),
                     "estimated_duration_ms": 0,
-                    "covered_duration_ms": covered_ms,
-                    "completeness": 1.0,
-                    "gap_count": 0,
+                    "covered_duration_ms": int(covered_ms),
+                    "completeness": float(completeness),
+                    "gap_count": int(gap_count),
                 },
             }
             body = json.dumps(response).encode("utf-8")

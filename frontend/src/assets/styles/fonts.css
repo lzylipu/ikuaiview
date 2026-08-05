@@ -1,0 +1,17 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Self-hosted Fonts
+   MiSans — Chinese and Latin subsets
+   JetBrains Mono — monospace for code/numbers
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── MiSans Chinese (Simplified) — Regular + Medium + Semibold ──── */
+@import 'misans/lib/Normal/MiSans-Regular.min.css';
+@import 'misans/lib/Normal/MiSans-Medium.min.css';
+
+/* ── MiSans Latin — Regular + Medium ────────────────────────────── */
+@import 'misans/lib/Latin/MiSansLatin-Regular.min.css';
+@import 'misans/lib/Latin/MiSansLatin-Medium.min.css';
+
+/* ── JetBrains Mono — Regular + Semi-bold ───────────────────────── */
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/600.css';

@@ -264,3 +264,13 @@ CI builds on every push to `main` and tags the commit short SHA, plus `latest` o
 - Frontend: Vue 3 ecosystem
 
 Gateway integration, data contract, and board information architecture are maintained independently by this project.
+
+## 🧩 Frontend Source
+
+The production image ships prebuilt `dist/` + `gateway.py`. To build UI yourself:
+
+```bash
+cd frontend && pnpm install && pnpm build
+```
+
+UI baseline: **v035**.
