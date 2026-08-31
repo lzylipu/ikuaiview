@@ -1,21 +1,8 @@
 # 📊 iKuaiView
 
-<p align="center">
-  <img src="dist/ikuaiview-logo.png" alt="iKuaiView logo" width="128" height="128" />
-</p>
+**iKuai（爱快）只读监控看板 · 局域网 / 反代公网均可部署**
 
-<p align="center">
-  <strong>iKuai（爱快）只读监控看板 · 局域网 / 反代公网均可部署</strong><br>
-  <code>ikuai-exporter + Prometheus + Web 看板 → 一套 Compose 模板直接跑</code>
-</p>
-
-<p align="center">
-  <a href="https://github.com/lzylipu/ikuaiview/actions/workflows/docker-publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/lzylipu/ikuaiview/docker-publish.yml?style=flat-square&label=docker%20build" alt="Docker Build"></a>
-  <a href="https://hub.docker.com/r/lzylipu/ikuaiview"><img src="https://img.shields.io/docker/v/lzylipu/ikuaiview?sort=semver&style=flat-square&label=docker%20hub" alt="Docker Hub"></a>
-  <a href="https://github.com/lzylipu/ikuaiview/pkgs/container/ikuaiview"><img src="https://img.shields.io/badge/ghcr.io-lzylipu%2Fikuaiview-blue?style=flat-square" alt="GHCR"></a>
-  <img src="https://img.shields.io/badge/board%20port-3000-green?style=flat-square" alt="Port">
-  <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License">
-</p>
+  `ikuai-exporter + Prometheus + Web 看板 → 一套 Compose 模板直接跑`
 
 ---
 
@@ -350,8 +337,6 @@ docker-compose down
 
 ---
 
-
-
 ## 🧩 前端源码 / Frontend Source
 
 生产 Docker 镜像使用根目录预构建 `dist/` + `gateway.py`（Alpine，无需 Node）。
@@ -375,7 +360,6 @@ pnpm build
 
 网关对接、数据契约与面板信息架构由本项目独立维护。
 
-
 ---
 
 ---
@@ -383,8 +367,6 @@ pnpm build
 # 🌐 English
 
 📖 **Full English documentation**: **[README_EN.md](./README_EN.md)**
-
-For the complete English version of this README — including architecture, deploy template, environment variables, board panels, security notes and image tags — please see **[README_EN.md](./README_EN.md)**.
 
 ## 🚀 One-shot
 

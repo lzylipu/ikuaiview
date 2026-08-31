@@ -1,21 +1,10 @@
 # 📊 iKuaiView
 
-<p align="center">
-  <img src="dist/ikuaiview-logo.png" alt="iKuaiView logo" width="128" height="128" />
-</p>
+  
 
-<p align="center">
-  <strong>Read-only dashboard for iKuai routers · LAN or reverse-proxied public Internet</strong><br>
-  <code>ikuai-exporter + Prometheus + Web board → one Compose template to run</code>
-</p>
+  **Read-only dashboard for iKuai routers · LAN or reverse-proxied public Internet**
 
-<p align="center">
-  <a href="https://github.com/lzylipu/ikuaiview/actions/workflows/docker-publish.yml"><img src="https://img.shields.io/github/actions/workflow/status/lzylipu/ikuaiview/docker-publish.yml?style=flat-square&label=docker%20build" alt="Docker Build"></a>
-  <a href="https://hub.docker.com/r/lzylipu/ikuaiview"><img src="https://img.shields.io/docker/v/lzylipu/ikuaiview?sort=semver&style=flat-square&label=docker%20hub" alt="Docker Hub"></a>
-  <a href="https://github.com/lzylipu/ikuaiview/pkgs/container/ikuaiview"><img src="https://img.shields.io/badge/ghcr.io-lzylipu%2Fikuaiview-blue?style=flat-square" alt="GHCR"></a>
-  <img src="https://img.shields.io/badge/board%20port-3000-green?style=flat-square" alt="Port">
-  <img src="https://img.shields.io/badge/license-MIT-yellow?style=flat-square" alt="License">
-</p>
+  `ikuai-exporter + Prometheus + Web board → one Compose template to run`
 
 ---
 
