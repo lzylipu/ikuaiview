@@ -6,7 +6,7 @@
 
 ---
 
-[中文] | [English](#-english)
+[English](./README_EN.md) | 中文
 
 ## ✨ 核心特性
 
