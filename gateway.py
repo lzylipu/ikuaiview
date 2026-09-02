@@ -233,6 +233,10 @@ def _init_db():
     );
 
     -- 爱快每次启动后的当前累计字节，用来在重启后差值修正
+    CREATE TABLE IF NOT EXISTS kv_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS reboot_baseline (
         ip TEXT PRIMARY KEY,
         booted_at INTEGER NOT NULL,                -- 这台爱快本次启动时间 (unix)
@@ -252,6 +256,51 @@ def _init_db():
     c.close()
 
 _init_db()
+
+# 启动预填：用 SQLite 历史日累计先把本月用量顶起来，避免进程刚起、
+# homepage/iface_monthly_stats 尚未回源时 snapshot 推 monthly=0（移动端首屏 0 的根源）
+def _prefill_monthly_cache():
+    try:
+        month_start = _month_start_ts_cn(int(time.time()))
+        with db_lock:
+            _c = _db_conn()
+            try:
+                row = _c.execute(
+                    """SELECT IFNULL(SUM(upload),0) as u, IFNULL(SUM(download),0) as d
+                       FROM iface_daily_bytes WHERE interface='wan1' AND ts >= ?""",
+                    (month_start,),
+                ).fetchone()
+            finally:
+                _c.close()
+        total = int(row["u"]) + int(row["d"]) if row else 0
+        if total > 0:
+            monthly_usage_cache["gb"] = round(total / (1024 ** 3), 2)
+            monthly_usage_cache["covered_seconds"] = 31 * 86400
+            monthly_usage_cache["ts"] = time.time()
+            print(f"[init] monthly prefilled from db: {monthly_usage_cache['gb']} GB", flush=True)
+        else:
+            # 历史日累计为空时, 用持久化的 homepage 月用量兜底(跨重启保持显示)
+            with db_lock:
+                _kc = _db_conn()
+                try:
+                    kr = _kc.execute("SELECT value FROM kv_state WHERE key='homepage_month'").fetchone()
+                finally:
+                    _kc.close()
+            if kr:
+                _st = json.loads(kr["value"])
+                _tb = int(_st.get("total_bytes") or 0)
+                if _tb > 0:
+                    homepage_usage_cache.update({"total_bytes": _tb, "isp": _st.get("isp", ""), "ip": _st.get("ip", ""), "ts": time.time()})
+                    ikuai_extra_cache["homepage_wan_month_total_bytes"] = _tb
+                    if _st.get("ip"):
+                        ikuai_extra_cache["homepage_wan_ip"] = _st.get("ip")
+                    monthly_usage_cache["gb"] = round(_tb / (1024 ** 3), 2)
+                    monthly_usage_cache["covered_seconds"] = 31 * 86400
+                    monthly_usage_cache["ts"] = time.time()
+                    print(f"[init] monthly restored from kv: {monthly_usage_cache['gb']} GB", flush=True)
+    except Exception as _e:
+        print("[init] monthly prefill skipped:", _e, flush=True)
+
 # 兼容前版本：若 reboot_baseline 缺 last_seen 列则补
 try:
     _c = _db_conn()
@@ -265,6 +314,8 @@ except Exception as _e:
 db_lock = threading.Lock()
 
 print(f"[init] DB at {DB_PATH}, TZ=Asia/Shanghai fallback enabled", flush=True)
+
+_prefill_monthly_cache()
 
 
 def tcp_probe(host, port=443, timeout=2.0):
@@ -402,7 +453,9 @@ def fetch_monthly_usage_gb():
         total_bytes_month = int(float(wan1_stream.get("total_up") or 0)) + int(float(wan1_stream.get("total_down") or 0))
 
     gb = round(total_bytes_month / (1024 ** 3), 2)
-    monthly_usage_cache.update({"gb": gb, "covered_seconds": 31 * 86400, "ts": now})
+    if gb > 0:
+        # 只缓存有效值；0 不入缓存，避免把"回源空窗"钉死 15s 并反复推 0
+        monthly_usage_cache.update({"gb": gb, "covered_seconds": 31 * 86400, "ts": now})
     return gb, 31 * 86400
 
 def rate_to_bps(val):
@@ -814,6 +867,23 @@ def _fetch_ikuai_metadata_locked():
                     "ip": extra["homepage_wan_ip"],
                     "ts": now_ts,
                 })
+                # 持久化月用量到 kv_state: 供进程重启后兜底, 防空窗期 snapshot 推 0
+                try:
+                    with db_lock:
+                        _pc = _db_conn()
+                        try:
+                            _pc.execute(
+                                "INSERT INTO kv_state(key,value) VALUES('homepage_month',?) "
+                                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                                (json.dumps({"total_bytes": extra["homepage_wan_month_total_bytes"],
+                                             "ip": extra["homepage_wan_ip"],
+                                             "isp": extra["homepage_wan_isp"],
+                                             "ts": now_ts}),))
+                            _pc.commit()
+                        finally:
+                            _pc.close()
+                except Exception:
+                    pass
                 # 若拨号时间缺失，用 homepage 的 updatetime 兜底
                 if not extra.get("wan_dial_time_ts"):
                     up = wan_stat.get("updatetime") or 0
@@ -1697,6 +1767,23 @@ def make_update_payload(data):
         }]
     return out
 
+def _empty_metrics_shell():
+    """exporter 不可达时的最小 metrics 空壳: 让 snapshot/update 照常推送,
+    身份与月用量由 homepage/extra/kv 兜底, 避免前端整页饿死成 '—'/0。"""
+    shell = {
+        "wan_ip": "", "wan_proto": "PPPOE",
+        "wan_speed": {"down": 0, "up": 0},
+        "wan_total_down_bytes": 0, "wan_total_up_bytes": 0,
+        "cpu_usage": 0, "uptime": 0,
+        "mem_used_bytes": 0, "mem_total_bytes": 0,
+        "model": "", "version": "",
+        "host_conns": 0, "devices": [], "interfaces": [], "latency_probes": [],
+    }
+    # 月用量不依赖 exporter: homepage/kv 兜底链独立供给
+    shell["monthly_usage_gb"], shell["monthly_usage_covered_seconds"] = fetch_monthly_usage_gb()
+    return shell
+
+
 class WebHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
@@ -1714,6 +1801,25 @@ class WebHandler(BaseHTTPRequestHandler):
         conn = self.connection
         conn.setblocking(True)
         print("[WS] Connection upgraded successfully.", flush=True)
+
+        def client_gone():
+            """非阻塞探测客户端是否已发送关闭帧/断开。
+            返回 True 表示应结束推送循环。"""
+            try:
+                conn.setblocking(False)
+                data = conn.recv(1024)
+                conn.setblocking(True)
+                # recv 返回空 = 对端关闭;收到客户端 close 帧(0x88)也退出
+                if not data or (len(data) >= 1 and (data[0] & 0x0F) == 0x8):
+                    return True
+                # 忽略其它客户端帧(ping/text),继续推
+                return False
+            except BlockingIOError:
+                conn.setblocking(True)
+                return False
+            except Exception:
+                conn.setblocking(True)
+                return True
 
         def send_frame(msg_type, data):
             envelope = {"type": msg_type, "data": data}
@@ -1735,15 +1841,20 @@ class WebHandler(BaseHTTPRequestHandler):
         try:
             # 1. 首次推送 snapshot
             metrics = fetch_exporter_metrics()
-            if "error" not in metrics:
-                send_frame("snapshot", make_snapshot_payload(metrics))
+            if "error" in metrics:
+                metrics = _empty_metrics_shell()
+            send_frame("snapshot", make_snapshot_payload(metrics))
 
             # 2. 循环推送 update：默认 1s（实时 rx/tx、chart-rates、终端表）
-            while True:
+            # 每轮先探测客户端是否已关闭(关标签/刷新),避免向死连接空推
+            while not client_gone():
                 time.sleep(max(0.5, float(WS_PUSH_SECONDS)))
+                if client_gone():
+                    break
                 metrics = fetch_exporter_metrics()
-                if "error" not in metrics:
-                    send_frame("update", make_update_payload(metrics))
+                if "error" in metrics:
+                    metrics = _empty_metrics_shell()
+                send_frame("update", make_update_payload(metrics))
         except Exception as e:
             print("[WS] Connection closed:", e, flush=True)
         finally:
