@@ -26,6 +26,12 @@ IKUAI_USER     = os.environ.get("IKUAI_USERNAME", "")
 IKUAI_PASS     = os.environ.get("IKUAI_PASSWORD", "")
 IKUAI_HOST     = urllib.parse.urlparse(IKUAI_URL).hostname or "—"
 
+# 兼容爱快 Web 管理强制 HTTPS(4.0.310+ 自签证书):仅对直连爱快的请求关闭
+# TLS 证书校验。http 环境下不触发 TLS,此 context 无副作用(与 http 行为完全一致)。
+_BYPASS = ssl.create_default_context()
+_BYPASS.check_hostname = False
+_BYPASS.verify_mode = ssl.CERT_NONE
+
 # 设备显示名严格按爱快「DHCP 静态分配」的 IP 对应名称。
 # exporter 上报的 hostname 仅为系统识别名，不作为显示依据。
 STATIC_ALIASES = {}
@@ -528,7 +534,7 @@ def _fetch_ikuai_metadata_locked():
             data=json.dumps(login_payload).encode("utf-8"),
             headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
         )
-        with urllib.request.urlopen(req, timeout=5) as res:
+        with urllib.request.urlopen(req, timeout=5, context=_BYPASS) as res:
             cookies = res.info().get_all("Set-Cookie", []) or []
             for c in cookies:
                 for p in c.split(";"):
@@ -570,7 +576,7 @@ def _fetch_ikuai_metadata_locked():
                 "User-Agent": "Mozilla/5.0",
             },
         )
-        with urllib.request.urlopen(req, timeout=8) as res:
+        with urllib.request.urlopen(req, timeout=8, context=_BYPASS) as res:
             body = json.loads(res.read().decode("utf-8"))
         results_obj = body.get("results") or {}
         # 列表型接口：results.data
@@ -940,7 +946,7 @@ def _ikuai_call_shared(func_name: str, param=None):
                 data=json.dumps(login_payload).encode("utf-8"),
                 headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
             )
-            with urllib.request.urlopen(req, timeout=5) as res:
+            with urllib.request.urlopen(req, timeout=5, context=_BYPASS) as res:
                 cookies = res.info().get_all("Set-Cookie", []) or []
                 sess_key = None
                 for c in cookies:
@@ -968,7 +974,7 @@ def _ikuai_call_shared(func_name: str, param=None):
             "User-Agent": "Mozilla/5.0",
         },
     )
-    with urllib.request.urlopen(req, timeout=8) as res:
+    with urllib.request.urlopen(req, timeout=8, context=_BYPASS) as res:
         body = json.loads(res.read().decode("utf-8"))
     return body.get("results") or {}
 
